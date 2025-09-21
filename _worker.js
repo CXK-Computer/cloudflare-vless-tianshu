@@ -1,36 +1,33 @@
 import { connect as cfConnect } from 'cloudflare:sockets';
 import { connect as tlsConnect } from 'node:tls';
 
-// ================== 日志系统 (优化) ==================
-// 用于存储最近的错误日志
+// ================== 日志系统 ==================
 let errorLogs = [];
-// 日志最大存储数量
 const MAX_LOGS = 25;
-
-/**
- * 记录一个错误日志
- * @param {string} message - 错误的主要信息
- * @param {object} details - 包含错误上下文的附加对象
- */
 function logError(message, details = {}) {
   const timestamp = new Date().toISOString();
   console.error(message, details);
-  errorLogs.unshift({
-    timestamp,
-    message,
-    details, // 优化：直接存储对象，延迟序列化
-  });
-  if (errorLogs.length > MAX_LOGS) {
-    errorLogs.length = MAX_LOGS;
-  }
+  errorLogs.unshift({ timestamp, message, details });
+  if (errorLogs.length > MAX_LOGS) errorLogs.length = MAX_LOGS;
 }
 // ============================================
 
-// --- 性能优化：缓存正则表达式 ---
 const PROXY_REGEX = /\/(socks5|http|https):\/\/([^\/\?&]+)/;
-
-// 支持全局代理路径配置 /socks5://, /http://, 和 /https://
 let 哎呀呀这是我的VL密钥 = "fb00086e-abb9-4983-976f-d407bbea9a4c";
+
+// --- 优化 3: 高性能 UUID 验证 ---
+// 预先计算一次 UUID 的字符串形式，用于比较
+const formattedUUID = "fb00086e-abb9-4983-976f-d407bbea9a4c"; 
+function isValidUUID(view) {
+  if (view.length !== 16) return false;
+  let result = '';
+  for (let i = 0; i < 16; i++) {
+    result += view[i].toString(16).padStart(2, '0');
+  }
+  const formatted = `${result.substring(0, 8)}-${result.substring(8, 12)}-${result.substring(12, 16)}-${result.substring(16, 20)}-${result.substring(20)}`;
+  return formatted === formattedUUID;
+}
+
 
 class NodeToWebStreamAdapter {
   constructor(nodeStream) {
@@ -55,8 +52,8 @@ class NodeToWebStreamAdapter {
 }
 
 function 解析代理路径(路径) {
-  const proxyMatch = 路径.match(PROXY_REGEX); // 复用缓存的正则表达式
-  return proxyMatch ? { 类型: proxyMatch[1], 账号: [decodeURIComponent(proxyMatch[2])] } : { 类型: 'direct' };
+  const proxyMatch = 路径.match(PROXY_REGEX);
+  return proxyMatch ? { 类型: proxyMatch[1], 账号: decodeURIComponent(proxyMatch[2]).split(',') } : { 类型: 'direct' };
 }
 
 function base64Decode(str) {
@@ -73,12 +70,9 @@ async function 启动传输管道(WS接口, 代理配置) {
         首包数据 = true;
         首包处理完成 = 解析首包数据(event.data);
       } else {
-        // --- 性能优化：移除 Promise 队列，直接写入 ---
         try {
-          await 首包处理完成; // 确保 TCP 管道已建立
-          if (传输数据) {
-            await 传输数据.write(event.data);
-          }
+          await 首包处理完成;
+          if (传输数据) await 传输数据.write(event.data);
         } catch (e) {
           logError('写入 TCP 失败', { error: e });
           WS接口.close();
@@ -87,54 +81,58 @@ async function 启动传输管道(WS接口, 代理配置) {
       }
     });
 
+    // --- 优化 2: "零拷贝" 头部解析 ---
     async function 解析首包数据(首包) {
-      const 二进制数据 = new Uint8Array(首包);
-      const 验证VL的密钥 = (a, i = 0) => [...a.slice(i, i + 16)].map(b => b.toString(16).padStart(2, '0')).join('').replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
-      if (验证VL的密钥(二进制数据.slice(1, 17)) !== 哎呀呀这是我的VL密钥) throw new Error('UUID验证失败');
-      
-      const 端口索引 = 18 + 二进制数据[17] + 1;
-      const 访问端口 = new DataView(二进制数据.buffer, 端口索引, 2).getUint16(0);
+      const buffer = 首包.buffer;
+      const view = new Uint8Array(buffer);
+
+      const uuidView = new Uint8Array(buffer, 1, 16);
+      if (!isValidUUID(uuidView)) throw new Error('UUID验证失败');
+
+      const addonLength = view[17];
+      const portIndex = 18 + addonLength + 1;
+      const portView = new DataView(buffer, portIndex, 2);
+      const 访问端口 = portView.getUint16(0);
 
       if (访问端口 === 53) {
-        const DNS查询 = 二进制数据.slice(端口索引 + 9);
-        const DOH结果 = await (await fetch('https://dns.google/dns-query', { method: 'POST', headers: { 'content-type': 'application/dns-message' }, body: DNS查询 })).arrayBuffer();
+        const dnsQueryView = new Uint8Array(buffer, portIndex + 9);
+        const DOH结果 = await (await fetch('https://dns.google/dns-query', { method: 'POST', headers: { 'content-type': 'application/dns-message' }, body: dnsQueryView })).arrayBuffer();
         WS接口.send(await new Blob([new Uint8Array([(DOH结果.byteLength >> 8) & 0xff, DOH结果.byteLength & 0xff]), DOH结果]));
-        return; // DNS 请求处理完毕，结束函数
+        return;
       }
 
-      const 地址索引 = 端口索引 + 2;
-      const 地址类型 = 二进制数据[地址索引];
-      let 地址信息索引 = 地址索引 + 1, 访问地址, 地址长度;
-      switch (地址类型) {
-        case 1: 地址长度 = 4; 访问地址 = 二进制数据.slice(地址信息索引, 地址信息索引 + 地址长度).join('.'); break;
-        case 2: 地址长度 = 二进制数据[地址信息索引++]; 访问地址 = new TextDecoder().decode(二进制数据.slice(地址信息索引, 地址信息索引 + 地址长度)); break;
-        case 3: 地址长度 = 16; const ipv6 = []; const 读取IPV6 = new DataView(二进制数据.buffer, 地址信息索引, 16); for (let i = 0; i < 8; i++) ipv6.push(读取IPV6.getUint16(i * 2).toString(16)); 访问地址 = ipv6.join(':'); break;
+      const addressIndex = portIndex + 2;
+      const addressType = view[addressIndex];
+      let addressInfoIndex = addressIndex + 1;
+      let 访问地址, addressLength;
+      
+      switch (addressType) {
+        case 1: addressLength = 4; 访问地址 = new Uint8Array(buffer, addressInfoIndex, 4).join('.'); break;
+        case 2: addressLength = view[addressInfoIndex++]; 访问地址 = new TextDecoder().decode(new Uint8Array(buffer, addressInfoIndex, addressLength)); break;
+        case 3: addressLength = 16; const ipv6 = []; const ipv6View = new DataView(buffer, addressInfoIndex, 16); for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2).toString(16)); 访问地址 = ipv6.join(':'); break;
         default: throw new Error('无效的访问地址');
       }
 
-      TCP接口 = await 创建代理连接(代理配置, 地址类型, 访问地址, 访问端口);
+      TCP接口 = await 创建代理连接(代理配置, addressType, 访问地址, 访问端口);
       await TCP接口.opened;
       传输数据 = TCP接口.writable.getWriter();
       读取数据 = TCP接口.readable.getReader();
 
-      const 初始数据 = 二进制数据.slice(地址信息索引 + 地址长度);
-      if (初始数据.length > 0) {
-        await 传输数据.write(初始数据);
+      const initialDataIndex = addressInfoIndex + addressLength;
+      if (initialDataIndex < buffer.byteLength) {
+        const initialDataView = new Uint8Array(buffer, initialDataIndex);
+        await 传输数据.write(initialDataView);
       }
       
-      // 启动回传管道，不再等待
       启动回传管道();
     }
     
-    // --- 性能优化：移除 Promise 队列 ---
     async function 启动回传管道() {
       try {
         while (true) {
           const { done, value } = await 读取数据.read();
           if (done) break;
-          if (value?.length > 0) {
-            WS接口.send(value); // WebSocket.send() 会自动缓冲
-          }
+          if (value?.length > 0) WS接口.send(value);
         }
       } catch (e) {
         logError('从 TCP 读取或发送到 WebSocket 失败', { error: e });
@@ -150,48 +148,52 @@ async function 启动传输管道(WS接口, 代理配置) {
   }
 }
 
+// --- 优化 1: 并行连接 (Connection Racing) ---
 async function 创建代理连接(代理配置, 地址类型, 访问地址, 访问端口) {
-  if (代理配置.类型 === 'https') {
-    for (const 账号字符串 of 代理配置.账号) {
-      try {
-        const { 账号, 密码, 地址, 端口 } = 解析代理账号(账号字符串);
-        const nodeSocket = tlsConnect({ host: 地址, port: 端口, rejectUnauthorized: false });
-        const adapter = new NodeToWebStreamAdapter(nodeSocket);
-        await adapter.opened;
-        await 建立HTTP连接(adapter, 账号, 密码, 地址类型, 访问地址, 访问端口);
-        return adapter;
-      } catch (error) {
-        logError(`HTTPS 代理连接失败`, { proxy: 账号字符串, target: `${访问地址}:${访问端口}`, error: error });
-      }
-    }
-    throw new Error(`所有 HTTPS 代理失效`);
-  }
-
   if (代理配置.类型 === 'direct') {
     const hostname = 地址类型 === 3 ? `[${访问地址}]` : 访问地址;
-    // --- 性能优化：使用静态导入的 cfConnect ---
     return cfConnect({ hostname, port: 访问端口 });
   }
 
-  for (const 账号字符串 of 代理配置.账号) {
-    try {
-      const { 账号, 密码, 地址, 端口 } = 解析代理账号(账号字符串);
-      // --- 性能优化：使用静态导入的 cfConnect ---
-      const socket = cfConnect({ hostname: 地址, port: 端口 });
-      await socket.opened;
-      if (代理配置.类型 === 'socks5') {
-        await 建立SOCKS5连接(socket, 账号, 密码, 地址类型, 访问地址, 访问端口);
-      } else {
-        await 建立HTTP连接(socket, 账号, 密码, 地址类型, 访问地址, 访问端口);
-      }
-      return socket;
-    } catch (error) {
-      logError(`${代理配置.类型} 代理连接失败`, { proxy: 账号字符串, target: `${访问地址}:${访问端口}`, error: error });
-    }
+  const connectionPromises = 代理配置.账号.map(账号字符串 => 
+    connectToProxy(账号字符串, 代理配置.类型, 地址类型, 访问地址, 访问端口)
+  );
+
+  try {
+    return await Promise.any(connectionPromises);
+  } catch (e) {
+    const errorMessages = e.errors ? e.errors.map(err => err.message) : [e.message];
+    logError(`所有 ${代理配置.类型} 代理均连接失败`, { errors: errorMessages });
+    throw new Error(`所有 ${代理配置.类型} 代理均连接失败`);
   }
-  throw new Error(`所有 ${代理配置.类型} 代理失效`);
 }
 
+async function connectToProxy(账号字符串, 类型, 地址类型, 访问地址, 访问端口) {
+  try {
+    if (类型 === 'https') {
+      const { 账号, 密码, 地址, 端口 } = 解析代理账号(账号字符串);
+      const nodeSocket = tlsConnect({ host: 地址, port: 端口, rejectUnauthorized: false });
+      const adapter = new NodeToWebStreamAdapter(nodeSocket);
+      await adapter.opened;
+      await 建立HTTP连接(adapter, 账号, 密码, 地址类型, 访问地址, 访问端口);
+      return adapter;
+    }
+    // SOCKS5 or HTTP
+    const { 账号, 密码, 地址, 端口 } = 解析代理账号(账号字符串);
+    const socket = cfConnect({ hostname: 地址, port: 端口 });
+    await socket.opened;
+    if (类型 === 'socks5') {
+      await 建立SOCKS5连接(socket, 账号, 密码, 地址类型, 访问地址, 访问端口);
+    } else {
+      await 建立HTTP连接(socket, 账号, 密码, 地址类型, 访问地址, 访问端口);
+    }
+    return socket;
+  } catch (error) {
+    throw new Error(`代理 ${账号字符串} 连接失败: ${error.message}`);
+  }
+}
+
+// SOCKS5, HTTP, IPv6, 账号解析等辅助函数保持不变...
 async function 建立SOCKS5连接(socket, 账号, 密码, 地址类型, 访问地址, 访问端口) {
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
@@ -276,15 +278,17 @@ function 解析代理账号(代理字符串) {
   return { 账号, 密码, 地址, 端口: parseInt(端口) };
 }
 
+
 export default {
   async fetch(访问请求, env, ctx) {
+    // ... HTML 页面和 fetch 主逻辑保持不变 ...
     try {
       if (访问请求.headers.get('Upgrade') === 'websocket') {
         let 路径 = 访问请求.url.replace(/^https?:\/\/[^/]+/, '');
         try {
           路径 = decodeURIComponent(路径);
         } catch (e) {
-          // 忽略解码错误，使用原始路径
+          // 忽略解码错误
         }
         
         const 代理配置 = 解析代理路径(路径);
@@ -297,8 +301,7 @@ export default {
 
       const url = new URL(访问请求.url);
       const hostname = url.hostname;
-      const uuid = 哎呀呀这是我的VL密钥;
-      const vlessLink = `vless://${uuid}@${hostname}:443?sni=${hostname}&host=${hostname}&type=ws&security=tls&path=%2F&encryption=none`;
+      const vlessLink = `vless://${哎呀呀这是我的VL密钥}@${hostname}:443?sni=${hostname}&host=${hostname}&type=ws&security=tls&path=%2F&encryption=none`;
       
       const html = `
       <!DOCTYPE html>
@@ -331,7 +334,7 @@ export default {
       <body>
           <div class="container">
               <h1>VLESS 配置链接</h1>
-              <p>点击下方按钮复制基础直连模式的 VLESS 配置链接 (Path: /)。</p>
+              <p>点击下方按钮复制基础直连模式的 VLESS 配置链接 (Path: /)。要使用代理，请手动修改 path 部分。</p>
               <div class="link-box">
                   <pre id="vless-link">${vlessLink}</pre>
                   <button class="copy-button" onclick="copyToClipboard()">复制</button>
@@ -349,9 +352,8 @@ export default {
                   ${errorLogs.length === 0 
                       ? '<p class="no-logs">目前没有错误日志。尝试使用客户端连接一次，如果失败，错误将显示在这里。</p>' 
                       : errorLogs.map(log => {
-                          // --- 性能优化：在渲染时序列化日志 ---
                           const detailsString = JSON.stringify(log.details, (key, value) =>
-                            value instanceof Error ? { message: value.message, stack: value.stack } : value, 2);
+                            value instanceof Error ? { message: value.message, stack: value.stack } : (typeof value === 'bigint' ? value.toString() : value), 2);
                           return `
                           <div class="log-entry">
                               <p><strong>时间 (UTC):</strong> ${log.timestamp}</p>
@@ -365,7 +367,6 @@ export default {
           <script>
               function copyToClipboard() {
                   const linkText = document.getElementById('vless-link').innerText;
-                  // 使用 navigator.clipboard API，作为更现代的备选方案
                   if (navigator.clipboard && window.isSecureContext) {
                       navigator.clipboard.writeText(linkText);
                   } else {
@@ -378,12 +379,9 @@ export default {
                       document.execCommand('copy');
                       document.body.removeChild(tempInput);
                   }
-
                   const status = document.getElementById('copy-status');
                   status.style.display = 'block';
-                  setTimeout(() => {
-                      status.style.display = 'none';
-                  }, 2000);
+                  setTimeout(() => { status.style.display = 'none'; }, 2000);
               }
           </script>
       </body>
