@@ -2,7 +2,7 @@
  * VLESS & Trojan 双协议 Worker
  * 该脚本融合了模块化设计、面向对象的编程思想以及最高效的流处理技术，
  * 可以在单一 Cloudflare Worker 上同时处理 VLESS 和 Trojan 协议的 WebSocket 连接。
- * @version 3.0.1 - 修复了 fetch handler 中 ctx 参数缺失导致 1101 错误的 Bug。
+ * @version 3.0.2 - 修复了因存在重复的 export default 导致 1101 错误的致命 Bug。
  */
 
 // 导入 Cloudflare Sockets API
@@ -244,7 +244,7 @@ class TrojanProtocolHandler {
 //   主逻辑入口
 // ==================
 export default {
-    async fetch(request, env, ctx) { // <--- 修复点 1: 补上 ctx 参数
+    async fetch(request, env, ctx) {
         const logger = new Logger('Main');
         try {
             const config = new Config(env);
@@ -256,7 +256,6 @@ export default {
             const [client, server] = Object.values(new WebSocketPair());
             server.accept();
 
-            // <--- 修复点 2: 使用正确的 ctx.waitUntil
             ctx.waitUntil(this.handleWebSocket(server, request, config).catch(err => {
                 logger.error('WebSocket 处理失败:', err);
                 logToUI('error', 'WebSocket 处理失败', { error: err });
@@ -293,7 +292,7 @@ export default {
         const trojanHandler = new TrojanProtocolHandler(config.trojanPassword);
         let headerResult = trojanHandler.parseHeader(firstChunk);
 
-        if (headerResult.error) { // 如果不是 Trojan, 尝试 VLESS
+        if (headerResult.error) {
             const vlessHandler = new VlessProtocolHandler(config.vlessId);
             headerResult = vlessHandler.parseHeader(firstChunk);
             if (headerResult.error) {
@@ -306,13 +305,10 @@ export default {
         const { protocol, address, port, dataStartIndex } = headerResult;
         logger.info(`协议: ${protocol}, 请求: ${address}:${port}`);
         
-        // 根据协议发送不同响应
         if (protocol === 'vless') {
-            webSocket.send(new Uint8Array([headerResult.version, 0])); // VLESS 响应
+            webSocket.send(new Uint8Array([headerResult.version, 0]));
         }
-        // Trojan 协议不需要初始响应
 
-        // 注意：这个简化版本不包含链式代理，如有需要需添加 ConnectionHandler
         logger.info(`正在直连: ${address}:${port}`);
         const hostname = address.includes(':') ? `[${address}]` : address;
         const remoteSocket = await connect({ hostname, port });
@@ -343,7 +339,6 @@ export default {
             }
         });
         
-        // 使用 pipeTo 实现高效转发
         readable.pipeTo(remoteSocket.writable, { preventClose: true }).catch(err => logger.error("WS->Remote pipe error:", err));
         logger.info(`✅ [${protocol}] WS -> Remote pipe setup complete.`);
         
@@ -358,7 +353,6 @@ export default {
                 webSocket.close(1000);
             }
         })).catch(err => logger.error("Remote->WS pipe error:", err));
-
         logger.info(`✅ [${protocol}] Remote -> WS pipe setup complete.`);
     },
 
