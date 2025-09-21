@@ -15,18 +15,16 @@ function logError(message, details = {}) {
 const PROXY_REGEX = /\/(socks5|http|https):\/\/([^\/\?&]+)/;
 let 哎呀呀这是我的VL密钥 = "fb00086e-abb9-4983-976f-d407bbea9a4c";
 
-// --- 优化: 高性能 UUID 验证 ---
-const formattedUUID = "fb00086e-abb9-4983-976f-d407bbea9a4c"; 
+// --- CPU 优化: 预计算 UUID 字节数组，实现最快验证 ---
+const UUID_BYTES = new Uint8Array(哎呀呀这是我的VL密钥.replace(/-/g, '').match(/.{2}/g).map(byte => parseInt(byte, 16)));
+
 function isValidUUID(view) {
   if (view.length !== 16) return false;
-  let result = '';
   for (let i = 0; i < 16; i++) {
-    result += view[i].toString(16).padStart(2, '0');
+    if (view[i] !== UUID_BYTES[i]) return false;
   }
-  const formatted = `${result.substring(0, 8)}-${result.substring(8, 12)}-${result.substring(12, 16)}-${result.substring(16, 20)}-${result.substring(20)}`;
-  return formatted === formattedUUID;
+  return true;
 }
-
 
 class NodeToWebStreamAdapter {
   constructor(nodeStream) {
@@ -52,7 +50,6 @@ class NodeToWebStreamAdapter {
 
 function 解析代理路径(路径) {
   const proxyMatch = 路径.match(PROXY_REGEX);
-  // --- 修复: 移除 .split(',')，正确处理单个代理信息 ---
   return proxyMatch ? { 类型: proxyMatch[1], 账号: [decodeURIComponent(proxyMatch[2])] } : { 类型: 'direct' };
 }
 
@@ -81,10 +78,13 @@ async function 启动传输管道(WS接口, 代理配置) {
       }
     });
 
-    // --- 优化: "零拷贝" 头部解析 ---
     async function 解析首包数据(首包) {
       const buffer = (首包 instanceof ArrayBuffer) ? 首包 : 首包.buffer;
       const view = new Uint8Array(buffer);
+
+      if (view.length < 38) { // 基本长度检查
+          throw new Error('无效的 VLESS 请求头');
+      }
 
       const uuidView = new Uint8Array(buffer, 1, 16);
       if (!isValidUUID(uuidView)) throw new Error('UUID验证失败');
@@ -135,7 +135,7 @@ async function 启动传输管道(WS接口, 代理配置) {
           if (value?.length > 0) WS接口.send(value);
         }
       } catch (e) {
-        logError('从 TCP 读取或发送到 WebSocket 失败', { error: e });
+        logError('数据回传失败', { error: e });
       } finally {
         WS接口.close();
         TCP接口?.close();
@@ -148,7 +148,6 @@ async function 启动传输管道(WS接口, 代理配置) {
   }
 }
 
-// --- 优化: 并行连接 (Connection Racing) ---
 async function 创建代理连接(代理配置, 地址类型, 访问地址, 访问端口) {
   if (代理配置.类型 === 'direct') {
     const hostname = 地址类型 === 3 ? `[${访问地址}]` : 访问地址;
@@ -160,10 +159,8 @@ async function 创建代理连接(代理配置, 地址类型, 访问地址, 访�
   );
 
   try {
-    // Promise.any 会返回第一个成功的连接
     return await Promise.any(connectionPromises);
   } catch (e) {
-    // 当所有 Promise 都失败时
     const errorMessages = e.errors ? e.errors.map(err => err.message) : [e.message];
     logError(`所有 ${代理配置.类型} 代理均连接失败`, { errors: errorMessages });
     throw new Error(`所有 ${代理配置.类型} 代理均连接失败`);
@@ -191,12 +188,11 @@ async function connectToProxy(账号字符串, 类型, 地址类型, 访问地�
     }
     return socket;
   } catch (error) {
-    // 抛出错误，以便 Promise.any 知道此尝试失败并继续尝试其他代理
     throw new Error(`代理 ${账号字符串} 连接失败: ${error.message}`);
   }
 }
 
-// SOCKS5, HTTP, IPv6, 账号解析等辅助函数保持不变
+// ... 辅助函数 ...
 async function 建立SOCKS5连接(socket, 账号, 密码, 地址类型, 访问地址, 访问端口) {
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
@@ -287,19 +283,18 @@ function 解析代理账号(代理字符串) {
 
 export default {
   async fetch(访问请求, env, ctx) {
+    // ... HTML 页面和 fetch 主逻辑 ...
     try {
       if (访问请求.headers.get('Upgrade') === 'websocket') {
         let 路径 = 访问请求.url.replace(/^https?:\/\/[^/]+/, '');
         try {
           路径 = decodeURIComponent(路径);
-        } catch (e) {
-          // 忽略解码错误
-        }
+        } catch (e) {}
         
         const 代理配置 = 解析代理路径(路径);
         const [客户端, WS接口] = Object.values(new WebSocketPair());
         WS接口.accept();
-        WS接口.send(new Uint8Array([0, 0])); // VLESS acks
+        WS接口.send(new Uint8Array([0, 0]));
         ctx.waitUntil(启动传输管道(WS接口, 代理配置));
         return new Response(null, { status: 101, webSocket: 客户端 });
       }
@@ -308,95 +303,9 @@ export default {
       const hostname = url.hostname;
       const vlessLink = `vless://${哎呀呀这是我的VL密钥}@${hostname}:443?sni=${hostname}&host=${hostname}&type=ws&security=tls&path=%2F&encryption=none`;
       
-      const html = `
-      <!DOCTYPE html>
-      <html lang="zh-CN">
-      <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Worker 配置与日志</title>
-          <style>
-              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; line-height: 1.6; background-color: #f4f4f9; color: #333; margin: 0; padding: 20px; }
-              .container { max-width: 800px; margin: 20px auto; background: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-              h1, h2 { color: #2a2a2a; border-bottom: 2px solid #eaeaea; padding-bottom: 10px; }
-              p { color: #555; }
-              button { background-color: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; font-size: 16px; transition: background-color 0.3s; }
-              button:hover { background-color: #0056b3; }
-              .link-box { display: flex; align-items: center; justify-content: space-between; background: #f0f0f0; border: 1px solid #ddd; border-radius: 5px; padding: 10px; margin-top: 15px; }
-              .link-box pre { flex-grow: 1; margin: 0; padding-right: 15px; white-space: pre-wrap; word-break: break-all; font-family: "Courier New", Courier, monospace; font-size: 14px; }
-              .copy-button { background-color: #28a745; }
-              .copy-button:hover { background-color: #218838; }
-              #copy-status { color: #28a745; margin-top: 10px; font-weight: bold; display: none; }
-              hr.separator { border: none; border-top: 1px solid #ccc; margin: 40px auto; max-width: 800px; }
-              #logs { margin-top: 20px; }
-              .log-entry { background: #f9f9f9; border: 1px solid #ddd; border-radius: 5px; padding: 15px; margin-bottom: 15px; word-wrap: break-word; }
-              .log-entry p { margin: 0 0 10px; }
-              .log-entry strong { color: #1a1a1a; }
-              .log-entry pre { background: #e9e9e9; padding: 10px; border-radius: 4px; white-space: pre-wrap; word-break: break-all; font-family: "Courier New", Courier, monospace; }
-              .no-logs { color: #888; }
-          </style>
-      </head>
-      <body>
-          <div class="container">
-              <h1>VLESS 配置链接</h1>
-              <p>点击下方按钮复制基础直连模式的 VLESS 配置链接 (Path: /)。要使用代理，请手动修改 path 部分。</p>
-              <div class="link-box">
-                  <pre id="vless-link">${vlessLink}</pre>
-                  <button class="copy-button" onclick="copyToClipboard()">复制</button>
-              </div>
-              <p id="copy-status">已复制到剪贴板！</p>
-          </div>
-      
-          <hr class="separator">
-      
-          <div class="container">
-              <h2>Worker 运行日志</h2>
-              <p>此页面显示最近在后台发生的连接错误。刷新此页面以查看最新日志。</p>
-              <button onclick="location.reload()">刷新日志</button>
-              <div id="logs">
-                  ${errorLogs.length === 0 
-                      ? '<p class="no-logs">目前没有错误日志。尝试使用客户端连接一次，如果失败，错误将显示在这里。</p>' 
-                      : errorLogs.map(log => {
-                          const detailsString = JSON.stringify(log.details, (key, value) =>
-                            value instanceof Error ? { message: value.message, stack: value.stack } : (typeof value === 'bigint' ? value.toString() : value), 2);
-                          return `
-                          <div class="log-entry">
-                              <p><strong>时间 (UTC):</strong> ${log.timestamp}</p>
-                              <p><strong>信息:</strong> ${log.message}</p>
-                              <pre><strong>详情:</strong>\n${detailsString}</pre>
-                          </div>`;
-                      }).join('')}
-              </div>
-          </div>
-      
-          <script>
-              function copyToClipboard() {
-                  const linkText = document.getElementById('vless-link').innerText;
-                  if (navigator.clipboard && window.isSecureContext) {
-                      navigator.clipboard.writeText(linkText).then(() => {
-                          showCopyStatus();
-                      });
-                  } else {
-                      const tempInput = document.createElement('textarea');
-                      tempInput.style.position = 'absolute';
-                      tempInput.style.left = '-9999px';
-                      document.body.appendChild(tempInput);
-                      tempInput.value = linkText;
-                      tempInput.select();
-                      document.execCommand('copy');
-                      document.body.removeChild(tempInput);
-                      showCopyStatus();
-                  }
-              }
-              function showCopyStatus() {
-                  const status = document.getElementById('copy-status');
-                  status.style.display = 'block';
-                  setTimeout(() => { status.style.display = 'none'; }, 2000);
-              }
-          </script>
-      </body>
-      </html>
-      `;
+      const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Worker 配置与日志</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;line-height:1.6;background-color:#f4f4f9;color:#333;margin:0;padding:20px}.container{max-width:800px;margin:20px auto;background:#fff;padding:25px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1)}h1,h2{color:#2a2a2a;border-bottom:2px solid #eaeaea;padding-bottom:10px}p{color:#555}button{background-color:#007bff;color:#fff;border:none;padding:10px 15px;border-radius:5px;cursor:pointer;font-size:16px;transition:background-color .3s}button:hover{background-color:#0056b3}.link-box{display:flex;align-items:center;justify-content:space-between;background:#f0f0f0;border:1px solid #ddd;border-radius:5px;padding:10px;margin-top:15px}.link-box pre{flex-grow:1;margin:0;padding-right:15px;white-space:pre-wrap;word-break:break-all;font-family:"Courier New",Courier,monospace;font-size:14px}.copy-button{background-color:#28a745}.copy-button:hover{background-color:#218838}#copy-status{color:#28a745;margin-top:10px;font-weight:700;display:none}hr.separator{border:none;border-top:1px solid #ccc;margin:40px auto;max-width:800px}#logs{margin-top:20px}.log-entry{background:#f9f9f9;border:1px solid #ddd;border-radius:5px;padding:15px;margin-bottom:15px;word-wrap:break-word}.log-entry p{margin:0 0 10px}.log-entry strong{color:#1a1a1a}.log-entry pre{background:#e9e9e9;padding:10px;border-radius:4px;white-space:pre-wrap;word-break:break-all;font-family:"Courier New",Courier,monospace}.no-logs{color:#888}</style></head><body><div class="container"><h1>VLESS 配置链接</h1><p>点击下方按钮复制基础直连模式的 VLESS 配置链接 (Path: /)。要使用代理，请手动修改 path 部分。</p><div class="link-box"><pre id="vless-link">${vlessLink}</pre><button class="copy-button" onclick="copyToClipboard()">复制</button></div><p id="copy-status">已复制到剪贴板！</p></div><hr class="separator"><div class="container"><h2>Worker 运行日志</h2><p>此页面显示最近在后台发生的连接错误。刷新此页面以查看最新日志。</p><button onclick="location.reload()">刷新日志</button><div id="logs">${errorLogs.length===0?'<p class="no-logs">目前没有错误日志。</p>':errorLogs.map(log=>{const detailsString=JSON.stringify(log.details,(key,value)=>value instanceof Error?{message:value.message,stack:value.stack}:typeof value==='bigint'?value.toString():value,2);return`
+                          <div class="log-entry"><p><strong>时间 (UTC):</strong> ${log.timestamp}</p><p><strong>信息:</strong> ${log.message}</p><pre><strong>详情:</strong>\n${detailsString}</pre></div>`}).join('')}</div></div><script>function copyToClipboard(){const linkText=document.getElementById('vless-link').innerText;if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(linkText).then(()=>{showCopyStatus()})}else{const tempInput=document.createElement('textarea');tempInput.style.position='absolute';tempInput.style.left='-9999px';document.body.appendChild(tempInput);tempInput.value=linkText;tempInput.select();document.execCommand('copy');document.body.removeChild(tempInput);showCopyStatus()}}
+function showCopyStatus(){const status=document.getElementById('copy-status');status.style.display='block';setTimeout(()=>{status.style.display='none'},2000)}</script></body></html>`;
       return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 
     } catch (error) {
