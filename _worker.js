@@ -243,7 +243,16 @@ export default {
   async fetch(访问请求, env, ctx) {
     try {
       if (访问请求.headers.get('Upgrade') === 'websocket') {
-        const 路径 = 访问请求.url.replace(/^https?:\/\/[^/]+/, '');
+        
+        // --- 关键修改：自动解码路径 ---
+        let 路径 = 访问请求.url.replace(/^https?:\/\/[^/]+/, '');
+        try {
+          路径 = decodeURIComponent(路径);
+        } catch (e) {
+          // 忽略解码错误，使用原始路径
+        }
+        // -------------------------
+
         const 代理配置 = 解析代理路径(路径);
         const [客户端, WS接口] = Object.values(new WebSocketPair());
         WS接口.accept();
