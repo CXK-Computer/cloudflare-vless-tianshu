@@ -15,8 +15,7 @@ function logError(message, details = {}) {
 const PROXY_REGEX = /\/(socks5|http|https):\/\/([^\/\?&]+)/;
 let 哎呀呀这是我的VL密钥 = "fb00086e-abb9-4983-976f-d407bbea9a4c";
 
-// --- 优化 3: 高性能 UUID 验证 ---
-// 预先计算一次 UUID 的字符串形式，用于比较
+// --- 优化: 高性能 UUID 验证 ---
 const formattedUUID = "fb00086e-abb9-4983-976f-d407bbea9a4c"; 
 function isValidUUID(view) {
   if (view.length !== 16) return false;
@@ -53,7 +52,8 @@ class NodeToWebStreamAdapter {
 
 function 解析代理路径(路径) {
   const proxyMatch = 路径.match(PROXY_REGEX);
-  return proxyMatch ? { 类型: proxyMatch[1], 账号: decodeURIComponent(proxyMatch[2]).split(',') } : { 类型: 'direct' };
+  // --- 修复: 移除 .split(',')，正确处理单个代理信息 ---
+  return proxyMatch ? { 类型: proxyMatch[1], 账号: [decodeURIComponent(proxyMatch[2])] } : { 类型: 'direct' };
 }
 
 function base64Decode(str) {
@@ -81,9 +81,9 @@ async function 启动传输管道(WS接口, 代理配置) {
       }
     });
 
-    // --- 优化 2: "零拷贝" 头部解析 ---
+    // --- 优化: "零拷贝" 头部解析 ---
     async function 解析首包数据(首包) {
-      const buffer = 首包.buffer;
+      const buffer = (首包 instanceof ArrayBuffer) ? 首包 : 首包.buffer;
       const view = new Uint8Array(buffer);
 
       const uuidView = new Uint8Array(buffer, 1, 16);
@@ -148,7 +148,7 @@ async function 启动传输管道(WS接口, 代理配置) {
   }
 }
 
-// --- 优化 1: 并行连接 (Connection Racing) ---
+// --- 优化: 并行连接 (Connection Racing) ---
 async function 创建代理连接(代理配置, 地址类型, 访问地址, 访问端口) {
   if (代理配置.类型 === 'direct') {
     const hostname = 地址类型 === 3 ? `[${访问地址}]` : 访问地址;
@@ -160,8 +160,10 @@ async function 创建代理连接(代理配置, 地址类型, 访问地址, 访�
   );
 
   try {
+    // Promise.any 会返回第一个成功的连接
     return await Promise.any(connectionPromises);
   } catch (e) {
+    // 当所有 Promise 都失败时
     const errorMessages = e.errors ? e.errors.map(err => err.message) : [e.message];
     logError(`所有 ${代理配置.类型} 代理均连接失败`, { errors: errorMessages });
     throw new Error(`所有 ${代理配置.类型} 代理均连接失败`);
@@ -189,11 +191,12 @@ async function connectToProxy(账号字符串, 类型, 地址类型, 访问地�
     }
     return socket;
   } catch (error) {
+    // 抛出错误，以便 Promise.any 知道此尝试失败并继续尝试其他代理
     throw new Error(`代理 ${账号字符串} 连接失败: ${error.message}`);
   }
 }
 
-// SOCKS5, HTTP, IPv6, 账号解析等辅助函数保持不变...
+// SOCKS5, HTTP, IPv6, 账号解析等辅助函数保持不变
 async function 建立SOCKS5连接(socket, 账号, 密码, 地址类型, 访问地址, 访问端口) {
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
@@ -201,11 +204,14 @@ async function 建立SOCKS5连接(socket, 账号, 密码, 地址类型, 访问�
   try {
     await writer.write(new Uint8Array([5, 2, 0, 2]));
     const authResponse = (await reader.read()).value;
+    if (!authResponse || authResponse.length < 2) throw new Error("SOCKS5 认证响应无效");
     if (authResponse[1] === 0x02) {
       if (!账号 && !密码) throw new Error('SOCKS5 代理需要凭证，但未提供');
       await writer.write(new Uint8Array([1, 账号.length, ...encoder.encode(账号), 密码.length, ...encoder.encode(密码)]));
       const authResult = (await reader.read()).value;
-      if (authResult[0] !== 0x01 || authResult[1] !== 0x00) throw new Error('SOCKS5 账号密码错误');
+      if (!authResult || authResult.length < 2 || authResult[0] !== 0x01 || authResult[1] !== 0x00) throw new Error('SOCKS5 账号密码错误');
+    } else if (authResponse[1] !== 0x00) {
+      throw new Error(`SOCKS5 不支持的认证方法: ${authResponse[1]}`);
     }
     let 地址数据;
     switch (地址类型) {
@@ -215,7 +221,7 @@ async function 建立SOCKS5连接(socket, 账号, 密码, 地址类型, 访问�
     }
     await writer.write(new Uint8Array([5, 1, 0, ...地址数据, 访问端口 >> 8, 访问端口 & 0xff]));
     const connectResponse = (await reader.read()).value;
-    if (connectResponse[0] !== 0x05 || connectResponse[1] !== 0x00) throw new Error(`SOCKS5 连接目标失败: ${访问地址}:${访问端口}`);
+    if (!connectResponse || connectResponse.length < 2 || connectResponse[0] !== 0x05 || connectResponse[1] !== 0x00) throw new Error(`SOCKS5 连接目标失败: ${访问地址}:${访问端口}`);
   } finally {
     writer.releaseLock();
     reader.releaseLock();
@@ -281,7 +287,6 @@ function 解析代理账号(代理字符串) {
 
 export default {
   async fetch(访问请求, env, ctx) {
-    // ... HTML 页面和 fetch 主逻辑保持不变 ...
     try {
       if (访问请求.headers.get('Upgrade') === 'websocket') {
         let 路径 = 访问请求.url.replace(/^https?:\/\/[^/]+/, '');
@@ -368,7 +373,9 @@ export default {
               function copyToClipboard() {
                   const linkText = document.getElementById('vless-link').innerText;
                   if (navigator.clipboard && window.isSecureContext) {
-                      navigator.clipboard.writeText(linkText);
+                      navigator.clipboard.writeText(linkText).then(() => {
+                          showCopyStatus();
+                      });
                   } else {
                       const tempInput = document.createElement('textarea');
                       tempInput.style.position = 'absolute';
@@ -378,7 +385,10 @@ export default {
                       tempInput.select();
                       document.execCommand('copy');
                       document.body.removeChild(tempInput);
+                      showCopyStatus();
                   }
+              }
+              function showCopyStatus() {
                   const status = document.getElementById('copy-status');
                   status.style.display = 'block';
                   setTimeout(() => { status.style.display = 'none'; }, 2000);
