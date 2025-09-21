@@ -1,5 +1,5 @@
 import { connect as cfConnect } from 'cloudflare:sockets';
-import { connect as tlsConnect } from 'node:tls';
+//移除了: import { connect as tlsConnect } from 'node:tls';
 
 // ================== 日志系统 ==================
 let errorLogs = [];
@@ -12,7 +12,7 @@ function logError(message, details = {}) {
 }
 // ============================================
 
-const PROXY_REGEX = /\/(socks5|http|https):\/\/([^\/\?&]+)/;
+const PROXY_REGEX = /\/(socks5|http):\/\/([^\/\?&]+)/; // 正则表达式中移除了 https
 let 哎呀呀这是我的VL密钥 = "fb00086e-abb9-4983-976f-d407bbea9a4c";
 
 // --- CPU 优化: 预计算 UUID 字节数组，实现最快验证 ---
@@ -26,33 +26,12 @@ function isValidUUID(view) {
   return true;
 }
 
-class NodeToWebStreamAdapter {
-  constructor(nodeStream) {
-    this.opened = new Promise((resolve, reject) => {
-      nodeStream.once('secureConnect', resolve);
-      nodeStream.once('error', reject);
-    });
-    this.readable = new ReadableStream({
-      start(controller) {
-        nodeStream.on('data', chunk => controller.enqueue(chunk));
-        nodeStream.on('end', () => controller.close());
-        nodeStream.on('error', err => controller.error(err));
-      },
-      cancel() { nodeStream.destroy(); }
-    });
-    this.writable = new WritableStream({
-      write(chunk) { return new Promise(resolve => nodeStream.write(chunk, resolve)); },
-      close() { return new Promise(resolve => nodeStream.end(resolve)); },
-      abort(err) { nodeStream.destroy(err); }
-    });
-  }
-}
-
 function 解析代理路径(路径) {
   const proxyMatch = 路径.match(PROXY_REGEX);
   return proxyMatch ? { 类型: proxyMatch[1], 账号: [decodeURIComponent(proxyMatch[2])] } : { 类型: 'direct' };
 }
 
+// ... base64Decode 和其他辅助函数保持不变 ...
 function base64Decode(str) {
   const base64 = str.replace(/-/g, '+').replace(/_/g, '/');
   const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
@@ -81,8 +60,8 @@ async function 启动传输管道(WS接口, 代理配置) {
     async function 解析首包数据(首包) {
       const buffer = (首包 instanceof ArrayBuffer) ? 首包 : 首包.buffer;
       const view = new Uint8Array(buffer);
-
-      if (view.length < 38) { // 基本长度检查
+      
+      if (view.length < 38) {
           throw new Error('无效的 VLESS 请求头');
       }
 
@@ -141,7 +120,6 @@ async function 启动传输管道(WS接口, 代理配置) {
         TCP接口?.close();
       }
     }
-
   } catch (e) {
     logError('传输管道发生致命错误', { error: e });
     WS接口.close();
@@ -169,14 +147,6 @@ async function 创建代理连接(代理配置, 地址类型, 访问地址, 访�
 
 async function connectToProxy(账号字符串, 类型, 地址类型, 访问地址, 访问端口) {
   try {
-    if (类型 === 'https') {
-      const { 账号, 密码, 地址, 端口 } = 解析代理账号(账号字符串);
-      const nodeSocket = tlsConnect({ host: 地址, port: 端口, rejectUnauthorized: false });
-      const adapter = new NodeToWebStreamAdapter(nodeSocket);
-      await adapter.opened;
-      await 建立HTTP连接(adapter, 账号, 密码, 地址类型, 访问地址, 访问端口);
-      return adapter;
-    }
     // SOCKS5 or HTTP
     const { 账号, 密码, 地址, 端口 } = 解析代理账号(账号字符串);
     const socket = cfConnect({ hostname: 地址, port: 端口 });
@@ -192,7 +162,7 @@ async function connectToProxy(账号字符串, 类型, 地址类型, 访问地�
   }
 }
 
-// ... 辅助函数 ...
+// ... SOCKS5, HTTP, IPv6 等辅助函数保持不变 ...
 async function 建立SOCKS5连接(socket, 账号, 密码, 地址类型, 访问地址, 访问端口) {
   const writer = socket.writable.getWriter();
   const reader = socket.readable.getReader();
