@@ -1,6 +1,6 @@
 import { connect as cfConnect } from 'cloudflare:sockets';
 
-// ================== 日志系统 (保留原样) ==================
+// ================== 日志系统 ==================
 let errorLogs = [];
 const MAX_LOGS = 25;
 function logError(message, details = {}) {
@@ -9,13 +9,20 @@ function logError(message, details = {}) {
   errorLogs.unshift({ timestamp, message, details });
   if (errorLogs.length > MAX_LOGS) errorLogs.length = MAX_LOGS;
 }
-// =======================================================
+// ============================================
 
 // --- 核心配置 ---
-// 请在使用时替换为您自己的 UUID
+// UUID, 请在使用时替换为您自己的
 let 哎呀呀这是我的VL密钥 = "fb00086e-abb9-4983-976f-d407bbea9a4c"; 
 
-// --- 预计算 UUID 以优化性能 (保留原样) ---
+// +++ 新增：性能与流量控制 +++
+// 默认开启流量控制，解决高延迟和丢包问题。
+// 如果您的网络环境极好，可以尝试关闭以获取更高速度，但稳定性可能下降。
+const ENABLE_FLOW_CONTROL = true; 
+// 流量控制的分片大小（字节），64或128是比较稳妥的值。
+const FLOW_CHUNK_SIZE = 128; 
+
+// --- 预计算 UUID (优化性能) ---
 const UUID_BYTES = new Uint8Array(哎呀呀这是我的VL密钥.replace(/-/g, '').match(/.{2}/g).map(byte => parseInt(byte, 16)));
 
 function isValidUUID(view) {
@@ -26,49 +33,30 @@ function isValidUUID(view) {
   return true;
 }
 
-// --- Base64 解码辅助函数 (保留原样) ---
-function base64Decode(str) {
-  const base64 = str.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
-  return atob(padded);
-}
-
-/**
- * 解析主机和端口的辅助函数
- * @param {string} hostSeg - 包含主机和可选端口的字符串
- * @returns {[string, number]} - 返回 [主机, 端口]
- */
 function parseHostPort(hostSeg) {
-    // 优先匹配 IPv6 地址
     const match = hostSeg.match(/^\[(.+)\]:(\d+)$/);
     if (match) {
         return [match[1], parseInt(match[2])];
     }
-    // 其次匹配域名或 IPv4 地址
     const lastColonIndex = hostSeg.lastIndexOf(':');
-    if (lastColonIndex !== -1 && hostSeg.includes('.')) {
+    // 确保不是IPv6地址的一部分
+    if (lastColonIndex !== -1 && !hostSeg.slice(0, lastColonIndex).includes(':')) {
         const portStr = hostSeg.substring(lastColonIndex + 1);
         const port = parseInt(portStr);
         if (!isNaN(port)) {
             return [hostSeg.substring(0, lastColonIndex), port];
         }
     }
-    return [hostSeg, 443]; // 默认端口
+    return [hostSeg, 443];
 }
 
-
-/**
- * 解析 SOCKS5 代理账号信息
- * @param {string} spec - 代理配置字符串
- * @returns {{username, password, host, port}}
- */
 function getSocks5Account(spec) {
     const atIndex = spec.lastIndexOf("@");
-    const credsPart = spec.slice(0, atIndex);
-    const hostPart = spec.slice(atIndex + 1);
+    const credsPart = atIndex !== -1 ? spec.slice(0, atIndex) : '';
+    const hostPart = atIndex !== -1 ? spec.slice(atIndex + 1) : spec;
     
     let username = '', password = '';
-    if (atIndex !== -1 && credsPart) {
+    if (credsPart) {
         const colonIndex = credsPart.indexOf(":");
         if (colonIndex !== -1) {
             username = credsPart.slice(0, colonIndex);
@@ -88,7 +76,6 @@ export default {
     try {
       if (request.headers.get('Upgrade') === 'websocket') {
         const url = new URL(request.url);
-        // 解码路径，以正确解析中文字符等
         const decodedPath = decodeURIComponent(url.pathname + url.search);
         
         const [client, server] = Object.values(new WebSocketPair());
@@ -98,7 +85,7 @@ export default {
         return new Response(null, { status: 101, webSocket: client });
       }
 
-      // --- 全新的 HTML 用户界面 ---
+      // HTML 界面保持不变
       const hostname = request.headers.get('host');
       const vlessLink = `vless://${哎呀呀这是我的VL密钥}@${hostname}:443?sni=${hostname}&type=ws&security=tls&path=%2F#Direct`;
       const vlessPyipLink = `vless://${哎呀呀这是我的VL密钥}@${hostname}:443?sni=${hostname}&type=ws&security=tls&path=%2Fpyip%3Dwww.visa.com#PYIP-Mode`;
@@ -118,7 +105,9 @@ function showCopyStatus(){const status=document.getElementById('copy-status');st
 async function 启动传输管道(ws, decodedPath) {
   let tcpConn, writer, reader;
   let firstPacket = false;
-  let firstPacketPromise = new Promise(resolve => {});
+  
+  // +++ 引入任务队列，确保数据有序发送 +++
+  let sendQueue = Promise.resolve();
 
   ws.addEventListener('message', async event => {
     if (!firstPacket) {
@@ -127,19 +116,17 @@ async function 启动传输管道(ws, decodedPath) {
         const firstPacketData = event.data;
         const { destHost, destPort, addrType, initialPayload } = await parseFirstPacket(firstPacketData);
 
-        // --- 核心：Plan A / Plan B 自动回退连接逻辑 ---
-        tcpConn = await createSmartConnection(destHost, destPort, addrType, decodedPath, initialPayload.length > 0);
+        tcpConn = await createSmartConnection(destHost, destPort, addrType, decodedPath);
         
         await tcpConn.opened;
         writer = tcpConn.writable.getWriter();
         reader = tcpConn.readable.getReader();
 
-        // 写入首包中剩余的数据
         if (initialPayload.length > 0) {
-            await writer.write(initialPayload);
+            // 使用任务队列发送首包剩余数据
+            sendQueue = sendQueue.then(() => writer.write(initialPayload)).catch(err => logError('写入首包数据失败', {error: err}));
         }
 
-        // 启动双向数据管道
         startBackPipe();
 
       } catch (e) {
@@ -148,15 +135,13 @@ async function 启动传输管道(ws, decodedPath) {
         tcpConn?.close();
       }
     } else {
-      // 后续数据包直接写入
+      // 后续数据包同样使用任务队列发送
       if (writer) {
-        try {
-            await writer.write(event.data);
-        } catch(e) {
-            logError('写入TCP失败', { error: e.message });
+        sendQueue = sendQueue.then(() => writer.write(event.data)).catch(err => {
+            logError('写入TCP失败', { error: err.message });
             ws.close();
             tcpConn?.close();
-        }
+        });
       }
     }
   });
@@ -166,8 +151,19 @@ async function 启动传输管道(ws, decodedPath) {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        
         if (value?.length > 0) {
-          ws.send(value);
+          // +++ 应用流量控制 +++
+          if (ENABLE_FLOW_CONTROL) {
+            let offset = 0;
+            while (offset < value.length) {
+              const chunk = value.slice(offset, offset + FLOW_CHUNK_SIZE);
+              sendQueue = sendQueue.then(() => ws.send(chunk)).catch(err => logError('WS分片发送失败', {error: err}));
+              offset += FLOW_CHUNK_SIZE;
+            }
+          } else {
+            sendQueue = sendQueue.then(() => ws.send(value)).catch(err => logError('WS发送失败', {error: err}));
+          }
         }
       }
     } catch (e) {
@@ -183,12 +179,11 @@ async function parseFirstPacket(firstData) {
     const buffer = (firstData instanceof ArrayBuffer) ? firstData : firstData.buffer;
     const view = new Uint8Array(buffer);
     
-    if (view.length < 38) {
+    if (view.length < 24) { // Basic VLESS header length check
         throw new Error('无效的VLESS请求头');
     }
 
-    const uuidView = new Uint8Array(buffer, 1, 16);
-    if (!isValidUUID(uuidView)) throw new Error('UUID验证失败');
+    if (!isValidUUID(new Uint8Array(buffer, 1, 16))) throw new Error('UUID验证失败');
 
     const addonLength = view[17];
     const portIndex = 18 + addonLength + 1;
@@ -211,17 +206,14 @@ async function parseFirstPacket(firstData) {
     return { destHost, destPort, addrType, initialPayload };
 }
 
-
 async function createSmartConnection(destHost, destPort, addrType, decodedPath) {
     let tcpConn;
-    // Plan A: 尝试直接连接
     try {
         tcpConn = cfConnect({ hostname: destHost.replace(/\[|\]/g, ''), port: destPort });
         return tcpConn;
     } catch (err) {
         logError('直连失败 (Plan A failed), 尝试后备方案 (Plan B)', { destination: `${destHost}:${destPort}`, error: err.message });
         
-        // Plan B: 直连失败，解析路径并使用后备方案
         const pyipMatch = decodedPath.match(/\/pyip=([^&]+)/);
         if (pyipMatch && pyipMatch[1]) {
             const [proxyHost, proxyPort] = parseHostPort(pyipMatch[1]);
@@ -243,45 +235,49 @@ async function createSocks5Connection(destHost, destPort, addrType, socks5Spec) 
     const { username, password, host, port } = getSocks5Account(socks5Spec);
     const socks5Conn = cfConnect({ hostname: host, port: port });
     
+    await socks5Conn.opened;
     const writer = socks5Conn.writable.getWriter();
     const reader = socks5Conn.readable.getReader();
 
     try {
-        await socks5Conn.opened;
-        
-        // 认证阶段
-        await writer.write(new Uint8Array([5, 1, 2])); // SOCKS5, 1 auth method, username/password
+        await writer.write(new Uint8Array([5, 1, 2])); 
         const authResp = (await reader.read()).value;
         if (!authResp || authResp[0] !== 5 || authResp[1] !== 2) {
-            throw new Error('SOCKS5 认证方法协商失败');
+            if (authResp[1] === 0) { // No auth needed
+                 // continue
+            } else {
+                throw new Error('SOCKS5 认证方法协商失败');
+            }
         }
-
-        const userPassPacket = new Uint8Array([1, username.length, ...new TextEncoder().encode(username), password.length, ...new TextEncoder().encode(password)]);
-        await writer.write(userPassPacket);
-        const userPassResp = (await reader.read()).value;
-        if (!userPassResp || userPassResp[0] !== 1 || userPassResp[1] !== 0) {
-            throw new Error('SOCKS5 账号密码错误');
+        if (authResp[1] === 2) {
+            const userPassPacket = new Uint8Array([1, username.length, ...new TextEncoder().encode(username), password.length, ...new TextEncoder().encode(password)]);
+            await writer.write(userPassPacket);
+            const userPassResp = (await reader.read()).value;
+            if (!userPassResp || userPassResp[0] !== 1 || userPassResp[1] !== 0) {
+                throw new Error('SOCKS5 账号密码错误');
+            }
         }
-
-        // 连接请求阶段
+        
         let addressBytes;
         const encoder = new TextEncoder();
         const cleanDestHost = destHost.replace(/\[|\]/g, '');
 
-        if (addrType === 1) { // IPv4
-            addressBytes = new Uint8Array([1, ...cleanDestHost.split('.').map(Number)]);
-        } else if (addrType === 2) { // Domain
+        if (addrType === 1) { 
+            addressBytes = [1, ...cleanDestHost.split('.').map(Number)];
+        } else if (addrType === 2) {
             const domainBytes = encoder.encode(cleanDestHost);
-            addressBytes = new Uint8Array([3, domainBytes.length, ...domainBytes]);
-        } else { // IPv6
-             const ipv6Bytes = cleanDestHost.split(':').flatMap(part => {
-                const hex = part.padStart(4, '0');
-                return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16)];
-            });
-            addressBytes = new Uint8Array([4, ...ipv6Bytes]);
+            addressBytes = [3, domainBytes.length, ...domainBytes];
+        } else {
+             const ipv6Bytes = [];
+             const hextets = cleanDestHost.split(':');
+             for (const hextet of hextets) {
+                const val = parseInt(hextet, 16);
+                ipv6Bytes.push(val >> 8, val & 0xff);
+             }
+             addressBytes = [4, ...ipv6Bytes];
         }
 
-        const portBytes = new Uint8Array([destPort >> 8, destPort & 0xff]);
+        const portBytes = [destPort >> 8, destPort & 0xff];
         const connectReq = new Uint8Array([5, 1, 0, ...addressBytes, ...portBytes]);
         
         await writer.write(connectReq);
@@ -290,7 +286,6 @@ async function createSocks5Connection(destHost, destPort, addrType, socks5Spec) 
             throw new Error(`SOCKS5 连接目标失败: ${connectResp[1]}`);
         }
         
-        // 成功建立隧道，释放锁，返回 socket
         writer.releaseLock();
         reader.releaseLock();
         return socks5Conn;
