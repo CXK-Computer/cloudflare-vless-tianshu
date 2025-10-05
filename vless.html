@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VLESS+ 批量生成器</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        .container {
+            max-width: 800px;
+        }
+        .proxy-settings {
+            /* 默认隐藏，由JS控制 */
+            display: none;
+            border-left: 3px solid #0d6efd;
+            padding-left: 15px;
+            margin-left: 15px;
+        }
+        #qrcode {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: white;
+            border-radius: .375rem;
+            display: inline-block;
+        }
+        #qrcode img {
+            margin: auto;
+        }
+        .list-group-item {
+            /* 默认隐藏，由JS控制 */
+            display: none;
+        }
+        /* 拖拽时的占位符样式 */
+        .sortable-ghost {
+            background-color: #d1e7fd;
+            border: 1px dashed #0d6efd;
+        }
+    </style>
+</head>
+<body>
+    <div class="container my-5">
+        <div class="card shadow-sm">
+            <div class="card-body">
+                <h1 class="card-title text-center mb-4">VLESS+ 批量生成器</h1>
+                <p class="text-center text-muted">融合了单链接配置与批量生成能力</p>
+
+                <!-- 表单区域 -->
+                <form id="vlessForm">
+                    <!-- 1. 基础配置 -->
+                    <h5 class="mt-4">1. 基础配置</h5>
+                    <div class="mb-3">
+                        <label for="workerHost" class="form-label">Worker 地址 (SNI / Host)</label>
+                        <input type="text" class="form-control" id="workerHost" placeholder="myworker.cftest.workers.dev" required>
+                    </div>
+                     <div class="mb-3">
+                        <label for="connectHost" class="form-label">连接地址 (IP/域名)</label>
+                        <input type="text" class="form-control" id="connectHost" placeholder="可选, 留空则默认使用Worker地址">
+                        <div class="form-text">客户端实际连接的地址, 例如 `1.2.3.4:8443` 或 `[2001::1]:443`。</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="uuid" class="form-label">UUID</label>
+                        <input type="text" class="form-control" id="uuid" value="fb00086e-abb9-4983-976f-d407bbea9a4c" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="remarks" class="form-label">备注 (节点名称)</label>
+                        <input type="text" class="form-control" id="remarks" placeholder="CF-Worker-Proxy" value="CF-Worker-Proxy">
+                    </div>
+
+                    <!-- 2. 路由模式 -->
+                    <h5 class="mt-4">2. 路由模式</h5>
+                    <div class="mb-3">
+                        <label for="connectionMode" class="form-label">连接模式</label>
+                        <select class="form-select" id="connectionMode">
+                            <option value="auto" selected>auto (自动故障转移)</option>
+                            <option value="direct">direct (仅直连)</option>
+                            <option value="s5">s5 (仅SOCKS5)</option>
+                            <option value="http">http (仅HTTP代理)</option>
+                            <option value="proxyip">proxyip (仅前置IP)</option>
+                            <option value="batch">batch (批量Socks/HTTP模式)</option>
+                        </select>
+                    </div>
+                    
+                    <!-- 3. 代理配置 -->
+                    <h5 class="mt-4">3. 代理配置</h5>
+
+                    <!-- Auto模式下的选项 -->
+                    <div id="auto-mode-options">
+                        <p class="form-text">在 Auto 模式下，将按勾选顺序尝试连接。请拖拽排序。</p>
+                        <ul id="sortable-list" class="list-group">
+                            <li class="list-group-item" data-type="s5">
+                                <input class="form-check-input me-1" type="checkbox" value="s5" id="checkS5" checked> SOCKS5 代理
+                                <div id="s5-settings" class="mt-2 proxy-settings">
+                                    <input type="text" class="form-control mb-2" id="s5Host" placeholder="SOCKS5 地址">
+                                    <input type="number" class="form-control mb-2" id="s5Port" placeholder="端口 (e.g., 1080)">
+                                    <input type="text" class="form-control mb-2" id="s5User" placeholder="用户名 (可选)">
+                                    <input type="password" class="form-control" id="s5Pass" placeholder="密码 (可选)">
+                                </div>
+                            </li>
+                            <li class="list-group-item" data-type="http">
+                                <input class="form-check-input me-1" type="checkbox" value="http" id="checkHttp"> HTTP 代理
+                                <div id="http-settings" class="mt-2 proxy-settings">
+                                    <input type="text" class="form-control mb-2" id="httpHost" placeholder="HTTP 代理地址">
+                                    <input type="number" class="form-control mb-2" id="httpPort" placeholder="端口 (e.g., 8888)">
+                                    <input type="text" class="form-control mb-2" id="httpUser" placeholder="用户名 (可选)">
+                                    <input type="password" class="form-control" id="httpPass" placeholder="密码 (可选)">
+                                </div>
+                            </li>
+                            <li class="list-group-item" data-type="proxyip">
+                                <input class="form-check-input me-1" type="checkbox" value="proxyip" id="checkProxyIp"> 前置 IP (链式代理)
+                                <div id="proxyip-settings" class="mt-2 proxy-settings">
+                                    <input type="text" class="form-control mb-2" id="proxyIpHost" placeholder="IP 地址">
+                                    <input type="number" class="form-control" id="proxyIpPort" placeholder="端口 (e.g., 443)">
+                                </div>
+                            </li>
+                             <li class="list-group-item" data-type="direct">
+                                <input class="form-check-input me-1" type="checkbox" value="direct" id="checkDirect"> 直接连接
+                            </li>
+                        </ul>
+                    </div>
+
+                    <!-- Batch模式下的选项 -->
+                    <div id="batch-mode-options" style="display: none;">
+                         <p class="form-text">每行输入一个 SOCKS5 或 HTTP 代理。格式: `协议://用户名:密码@IP:端口`</p>
+                         <textarea id="proxyList" class="form-control" rows="8" placeholder="socks5://user:pass@1.2.3.4:1080&#10;http://user2:pass2@5.6.7.8:8888"></textarea>
+                    </div>
+                    
+                    <div class="d-grid gap-2 mt-4">
+                        <button type="button" class="btn btn-primary" id="generateBtn">生成链接</button>
+                    </div>
+                </form>
+
+                <!-- 输出区域 -->
+                <div id="output" class="mt-4" style="display: none;">
+                    <h5>生成结果</h5>
+                    <div class="input-group">
+                        <textarea id="vlessLinks" class="form-control" rows="3" readonly></textarea>
+                        <button class="btn btn-outline-secondary" type="button" id="copyBtn">复制</button>
+                    </div>
+                    <div class="text-center">
+                        <div id="qrcode" class="mt-3 d-inline-block"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <footer class="text-center text-muted mt-4">
+            <p>&copy; 2025 VLESS+ Generator</p>
+        </footer>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+
+    <script>
+        // DOM 元素获取
+        const modeSelect = document.getElementById('connectionMode');
+        const autoOptions = document.getElementById('auto-mode-options');
+        const batchOptions = document.getElementById('batch-mode-options');
+        const generateBtn = document.getElementById('generateBtn');
+        const outputDiv = document.getElementById('output');
+        const vlessLinksText = document.getElementById('vlessLinks');
+        const copyBtn = document.getElementById('copyBtn');
+        const qrcodeDiv = document.getElementById('qrcode');
+        
+        const allListItems = {
+            s5: document.querySelector('.list-group-item[data-type="s5"]'),
+            http: document.querySelector('.list-group-item[data-type="http"]'),
+            proxyip: document.querySelector('.list-group-item[data-type="proxyip"]'),
+            direct: document.querySelector('.list-group-item[data-type="direct"]')
+        };
+        const checkboxes = {
+            s5: document.getElementById('checkS5'),
+            http: document.getElementById('checkHttp'),
+            proxyip: document.getElementById('checkProxyIp'),
+            direct: document.getElementById('checkDirect')
+        };
+        const settingsDivs = {
+            s5: document.getElementById('s5-settings'),
+            http: document.getElementById('http-settings'),
+            proxyip: document.getElementById('proxyip-settings')
+        };
+        const sortableList = document.getElementById('sortable-list');
+
+        // 初始化 SortableJS
+        new Sortable(sortableList, {
+            animation: 150,
+            ghostClass: 'sortable-ghost'
+        });
+
+        // 更新UI的函数 (已修复和增强)
+        function updateUI() {
+            const selectedMode = modeSelect.value;
+            
+            // 1. 先隐藏所有特定于模式的容器
+            autoOptions.style.display = 'none';
+            batchOptions.style.display = 'none';
+            Object.values(allListItems).forEach(item => item.style.display = 'none');
+            Object.values(settingsDivs).forEach(div => div.style.display = 'none');
+
+            // 2. 根据选择的模式显示对应的容器和控件
+            if (selectedMode === 'auto') {
+                autoOptions.style.display = 'block';
+                // 在auto模式下，显示所有选项
+                Object.values(allListItems).forEach(item => item.style.display = 'block');
+                // 并根据其复选框状态决定是否显示设置详情
+                Object.keys(settingsDivs).forEach(key => {
+                    if (checkboxes[key].checked) {
+                        settingsDivs[key].style.display = 'block';
+                    }
+                });
+            } else if (selectedMode === 'batch') {
+                batchOptions.style.display = 'block';
+            } else if (selectedMode === 'direct') {
+                autoOptions.style.display = 'block'; // 复用auto的容器
+                allListItems.direct.style.display = 'block';
+                checkboxes.direct.checked = true;
+            } else { // s5, http, proxyip 单模式
+                autoOptions.style.display = 'block'; // 复用auto的容器
+                allListItems[selectedMode].style.display = 'block';
+                settingsDivs[selectedMode].style.display = 'block';
+                checkboxes[selectedMode].checked = true; // 强制勾选
+            }
+        }
+        
+        // --- 批量生成逻辑 ---
+
+        /**
+         * 解析代理URL (从 Socks2VLESS.html 移植)
+         * @param {string} proxyUrl - 代理URL字符串
+         * @returns {object|null} 解析后的代理信息对象或null
+         */
+        function parseProxyUrl(proxyUrl) {
+            try {
+                let protocol, username = '', password = '', host, port, remark = '';
+
+                const remarkMatch = proxyUrl.match(/#(.+)$/);
+                if (remarkMatch) {
+                    remark = decodeURIComponent(remarkMatch[1]);
+                    proxyUrl = proxyUrl.replace(/#.*$/, '');
+                }
+                
+                const url = new URL(proxyUrl);
+                protocol = url.protocol.replace(':', '').toLowerCase();
+                if (protocol !== 'http' && protocol !== 'socks5') return null;
+
+                username = decodeURIComponent(url.username);
+                password = decodeURIComponent(url.password);
+                host = url.hostname;
+                port = url.port;
+                
+                if (!port) return null;
+
+                return { protocol, username, password, host, port, remark: remark || host };
+            } catch (error) {
+                console.error('解析代理URL失败:', proxyUrl, error);
+                return null;
+            }
+        }
+        
+        /**
+         * 解析地址和端口，支持IPv6
+         * @param {string} addressString - 包含地址和端口的字符串
+         * @param {number} defaultPort - 默认端口
+         * @returns {{address: string, port: number}}
+         */
+        function parseAddressAndPort(addressString, defaultPort) {
+            let address = addressString;
+            let port = defaultPort;
+
+            const lastColonIndex = addressString.lastIndexOf(':');
+            const lastBracketIndex = addressString.lastIndexOf(']');
+
+            if (lastColonIndex > lastBracketIndex) {
+                address = addressString.substring(0, lastColonIndex);
+                port = parseInt(addressString.substring(lastColonIndex + 1), 10);
+            }
+            // 移除IPv6的方括号
+            if (address.startsWith('[') && address.endsWith(']')) {
+                 address = address.substring(1, address.length - 1);
+            }
+            
+            return { address, port };
+        }
+
+
+        /**
+         * 生成批量链接
+         */
+        function generateBatchLinks() {
+            const workerHost = document.getElementById('workerHost').value.trim();
+            const connectHostInput = document.getElementById('connectHost').value.trim();
+            const uuid = document.getElementById('uuid').value.trim();
+            const baseRemarks = document.getElementById('remarks').value.trim();
+            const proxyList = document.getElementById('proxyList').value.trim();
+
+            if (!workerHost || !uuid) {
+                alert('请填写 Worker 地址和 UUID！');
+                return;
+            }
+            if (!proxyList) {
+                alert('请填写代理列表！');
+                return;
+            }
+            
+            const wsHost = workerHost; // Host 和 SNI 总是 Worker 地址
+            const connectAddressStr = connectHostInput || workerHost;
+            const { address: connectAddress, port: connectPort } = parseAddressAndPort(connectAddressStr, 443);
+
+            const proxyLines = proxyList.split('\n').filter(line => line.trim());
+            const generatedLinks = [];
+
+            for (const line of proxyLines) {
+                const proxyInfo = parseProxyUrl(line);
+                if (!proxyInfo) continue;
+
+                const pathParams = new URLSearchParams();
+                pathParams.append('mode', proxyInfo.protocol);
+
+                let proxyStr = '';
+                if (proxyInfo.username) proxyStr += encodeURIComponent(proxyInfo.username);
+                if (proxyInfo.password) proxyStr += ':' + encodeURIComponent(proxyInfo.password);
+                if (proxyInfo.username || proxyInfo.password) proxyStr += '@';
+                proxyStr += `${proxyInfo.host}:${proxyInfo.port}`;
+                pathParams.append(proxyInfo.protocol, proxyStr);
+
+                const path = `/?${pathParams.toString()}`;
+                
+                const linkParams = new URLSearchParams({
+                    type: 'ws',
+                    encryption: 'none',
+                    security: 'tls',
+                    sni: wsHost,
+                    host: wsHost,
+                    path: encodeURIComponent(path)
+                });
+                
+                const finalRemark = baseRemarks ? `${baseRemarks}${proxyInfo.remark}` : proxyInfo.remark;
+                const vlessUrl = `vless://${uuid}@${connectAddress}:${connectPort}?${linkParams.toString()}#${encodeURIComponent(finalRemark)}`;
+                generatedLinks.push(vlessUrl);
+            }
+            
+            if (generatedLinks.length > 0) {
+                 vlessLinksText.value = generatedLinks.join('\n');
+                 outputDiv.style.display = 'block';
+
+                 if (generatedLinks.length === 1) {
+                    vlessLinksText.rows = 3;
+                    qrcodeDiv.style.display = 'inline-block';
+                    qrcodeDiv.innerHTML = '';
+                    new QRCode(qrcodeDiv, {
+                        text: generatedLinks[0],
+                        width: 256,
+                        height: 256,
+                        correctLevel: QRCode.CorrectLevel.M
+                    });
+                 } else {
+                    vlessLinksText.rows = generatedLinks.length > 3 ? generatedLinks.length + 1 : 3;
+                    qrcodeDiv.style.display = 'none';
+                 }
+            } else {
+                alert('没有成功生成任何链接，请检查代理列表格式！');
+            }
+        }
+
+        /**
+         * 生成单个链接
+         */
+        function generateSingleLink() {
+            const workerHost = document.getElementById('workerHost').value.trim();
+            const connectHostInput = document.getElementById('connectHost').value.trim();
+            const uuid = document.getElementById('uuid').value.trim();
+            const remarks = document.getElementById('remarks').value.trim();
+
+            if (!workerHost || !uuid) {
+                alert('请填写 Worker 地址和 UUID！');
+                return;
+            }
+            
+            const wsHost = workerHost;
+            const connectAddressStr = connectHostInput || workerHost;
+            const { address: connectAddress, port: connectPort } = parseAddressAndPort(connectAddressStr, 443);
+
+
+            const pathParams = new URLSearchParams();
+            const mode = modeSelect.value;
+            
+            if (mode !== 'auto') {
+                pathParams.append('mode', mode);
+            }
+            
+            // 获取排序后的复选框
+            const orderedCheckboxes = Array.from(sortableList.querySelectorAll('li'))
+                                          .map(li => checkboxes[li.dataset.type]);
+
+            // 确定哪些复选框是激活的
+            const activeCheckboxes = (mode === 'auto') ? orderedCheckboxes.filter(cb => cb.checked) : [checkboxes[mode]];
+
+            for (const cb of activeCheckboxes) {
+                const type = cb.value;
+                 if (type === 's5' && document.getElementById('s5Host').value) {
+                    let s5Str = '';
+                    const user = document.getElementById('s5User').value.trim();
+                    const pass = document.getElementById('s5Pass').value.trim();
+                    const host = document.getElementById('s5Host').value.trim();
+                    const port = document.getElementById('s5Port').value.trim();
+                    if(host && port){
+                        if (user) s5Str += encodeURIComponent(user);
+                        if (pass) s5Str += ':' + encodeURIComponent(pass);
+                        if (user || pass) s5Str += '@';
+                        s5Str += `${host}:${port}`;
+                        pathParams.append('s5', s5Str);
+                    }
+                } else if (type === 'http' && document.getElementById('httpHost').value) {
+                     let httpStr = '';
+                    const user = document.getElementById('httpUser').value.trim();
+                    const pass = document.getElementById('httpPass').value.trim();
+                    const host = document.getElementById('httpHost').value.trim();
+                    const port = document.getElementById('httpPort').value.trim();
+                    if(host && port){
+                        if (user) httpStr += encodeURIComponent(user);
+                        if (pass) httpStr += ':' + encodeURIComponent(pass);
+                        if (user || pass) httpStr += '@';
+                        httpStr += `${host}:${port}`;
+                        pathParams.append('http', httpStr);
+                    }
+                } else if (type === 'proxyip' && document.getElementById('proxyIpHost').value) {
+                    const host = document.getElementById('proxyIpHost').value.trim();
+                    const port = document.getElementById('proxyIpPort').value.trim();
+                    if(host && port) pathParams.append('proxyip', `${host}:${port}`);
+                } else if (type === 'direct') {
+                    pathParams.append('direct', '');
+                }
+            }
+
+            const path = `/?${pathParams.toString()}`;
+            
+            const linkParams = new URLSearchParams({
+                type: 'ws',
+                encryption: 'none',
+                security: 'tls',
+                sni: wsHost,
+                host: wsHost,
+                path: encodeURIComponent(path)
+            });
+
+            const vlessUrl = `vless://${uuid}@${connectAddress}:${connectPort}?${linkParams.toString()}#${encodeURIComponent(remarks)}`;
+
+            // 显示输出
+            vlessLinksText.value = vlessUrl;
+            vlessLinksText.rows = 3;
+            outputDiv.style.display = 'block';
+            qrcodeDiv.style.display = 'inline-block'; // 单链接模式显示二维码
+
+            // 生成二维码
+            qrcodeDiv.innerHTML = '';
+            new QRCode(qrcodeDiv, {
+                text: vlessUrl,
+                width: 256,
+                height: 256,
+                correctLevel: QRCode.CorrectLevel.M
+            });
+        }
+
+
+        // --- 事件监听 ---
+        modeSelect.addEventListener('change', updateUI);
+        Object.values(checkboxes).forEach(cb => cb.addEventListener('change', updateUI));
+        
+        // 生成链接按钮点击事件
+        generateBtn.addEventListener('click', () => {
+            if (modeSelect.value === 'batch') {
+                generateBatchLinks();
+            } else {
+                generateSingleLink();
+            }
+        });
+        
+        // 复制按钮点击事件
+        copyBtn.addEventListener('click', () => {
+            if (!vlessLinksText.value) return;
+            
+            vlessLinksText.select();
+            // 修复：确保选中所有文本，无论多长
+            vlessLinksText.setSelectionRange(0, vlessLinksText.value.length); 
+
+            try {
+                document.execCommand('copy');
+                const originalText = copyBtn.textContent;
+                copyBtn.textContent = '已复制!';
+                setTimeout(() => {
+                    copyBtn.textContent = originalText;
+                }, 1500);
+            } catch (err) {
+                console.error('Fallback: Oops, unable to copy', err);
+            }
+        });
+
+        // 初始化UI
+        updateUI();
+    </script>
+</body>
+</html>
+
