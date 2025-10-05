@@ -1,299 +1,528 @@
-import { connect as cfConnect } from 'cloudflare:sockets';
+import { connect } from 'cloudflare:sockets';
 
-// ================== 日志系统 ==================
-let errorLogs = [];
-const MAX_LOGS = 25;
-function logError(message, details = {}) {
-  const timestamp = new Date().toISOString();
-  console.error(message, details);
-  errorLogs.unshift({ timestamp, message, details });
-  if (errorLogs.length > MAX_LOGS) errorLogs.length = MAX_LOGS;
-}
-// ============================================
+// ==================== 身份验证 ====================
+const AUTH_UUID = "fb00086e-abb9-4983-976f-d407bbea9a4c"; // 在这里修改为你自己的UUID
 
-// --- 核心配置 ---
-// UUID, 请在使用时替换为您自己的
-let 哎呀呀这是我的VL密钥 = "fb00086e-abb9-4983-976f-d407bbea9a4c"; 
+// ==================== 极致优化配置 (来自优化版) ====================
+const CONFIG = {
+  // 稳定性配置
+  KEEPALIVE_INTERVAL: 15000,           // 15秒心跳
+  STALL_TIMEOUT: 7000,                 // 7秒无数据检测
+  MAX_STALL_COUNT: 6,                  // 最大stall次数
+  MAX_RECONNECT_ATTEMPTS: 20,          // 最大重连次数
+  BASE_RECONNECT_DELAY: 100,           // 基础重连延迟(ms)
+  MAX_RECONNECT_DELAY: 20000,          // 最大重连延迟(ms)
+  RECONNECT_JITTER: 0.2,               // 重连随机抖动20%
+  
+  // 性能配置
+  MIN_CHUNK_SIZE: 64,                  // 最小分片大小
+  MAX_CHUNK_SIZE: 131072,              // 最大分片大小128KB
+  INITIAL_CHUNK_SIZE: 4096,            // 初始分片大小
+  SAMPLE_WINDOW: 15,                   // 采样窗口大小
+  CONCURRENCY_LIMIT: 8,                // 并发队列限制
+  BUFFER_POOL_SIZE: 32,                // 缓冲区池大小
+  BUFFER_SIZE: 16384,                  // 缓冲区大小16KB
+  
+  // 传输优化
+  ENABLE_DYNAMIC_CHUNKING: true,       // 启用动态分片
+  ENABLE_ZERO_COPY: true,              // 启用零拷贝优化
+  ENABLE_PREDICTIVE_RECONNECT: true,   // 启用预测性重连
+  ENABLE_ADAPTIVE_FLOW: true,          // 启用自适应流量控制
+  MAX_QUEUE_DEPTH: 100,                // 最大队列深度
+  QUEUE_TIMEOUT: 1000,                 // 队列超时(ms)
+};
 
-// +++ 新增：性能与流量控制 +++
-// 默认开启流量控制，解决高延迟和丢包问题。
-// 如果您的网络环境极好，可以尝试关闭以获取更高速度，但稳定性可能下降。
-const ENABLE_FLOW_CONTROL = true; 
-// 流量控制的分片大小（字节），64或128是比较稳妥的值。
-const FLOW_CHUNK_SIZE = 128; 
-
-// --- 预计算 UUID (优化性能) ---
-const UUID_BYTES = new Uint8Array(哎呀呀这是我的VL密钥.replace(/-/g, '').match(/.{2}/g).map(byte => parseInt(byte, 16)));
-
-function isValidUUID(view) {
-  if (view.length !== 16) return false;
-  for (let i = 0; i < 16; i++) {
-    if (view[i] !== UUID_BYTES[i]) return false;
-  }
-  return true;
-}
-
-function parseHostPort(hostSeg) {
-    const match = hostSeg.match(/^\[(.+)\]:(\d+)$/);
-    if (match) {
-        return [match[1], parseInt(match[2])];
-    }
-    const lastColonIndex = hostSeg.lastIndexOf(':');
-    // 确保不是IPv6地址的一部分
-    if (lastColonIndex !== -1 && !hostSeg.slice(0, lastColonIndex).includes(':')) {
-        const portStr = hostSeg.substring(lastColonIndex + 1);
-        const port = parseInt(portStr);
-        if (!isNaN(port)) {
-            return [hostSeg.substring(0, lastColonIndex), port];
-        }
-    }
-    return [hostSeg, 443];
-}
-
-function getSocks5Account(spec) {
-    const atIndex = spec.lastIndexOf("@");
-    const credsPart = atIndex !== -1 ? spec.slice(0, atIndex) : '';
-    const hostPart = atIndex !== -1 ? spec.slice(atIndex + 1) : spec;
-    
-    let username = '', password = '';
-    if (credsPart) {
-        const colonIndex = credsPart.indexOf(":");
-        if (colonIndex !== -1) {
-            username = credsPart.slice(0, colonIndex);
-            password = credsPart.slice(colonIndex + 1);
-        } else {
-            username = credsPart;
-        }
-    }
-    
-    const [host, port] = parseHostPort(hostPart);
-    return { username, password, host, port };
-}
-
-
+// ==================== 入口函数 (融合逻辑) ====================
 export default {
-  async fetch(request, env, ctx) {
-    try {
-      if (request.headers.get('Upgrade') === 'websocket') {
-        const url = new URL(request.url);
-        const decodedPath = decodeURIComponent(url.pathname + url.search);
-        
-        const [client, server] = Object.values(new WebSocketPair());
-        server.accept();
-        server.send(new Uint8Array([0, 0]));
-        ctx.waitUntil(启动传输管道(server, decodedPath));
-        return new Response(null, { status: 101, webSocket: client });
-      }
-
-      // HTML 界面保持不变
-      const hostname = request.headers.get('host');
-      const vlessLink = `vless://${哎呀呀这是我的VL密钥}@${hostname}:443?sni=${hostname}&type=ws&security=tls&path=%2F#Direct`;
-      const vlessPyipLink = `vless://${哎呀呀这是我的VL密钥}@${hostname}:443?sni=${hostname}&type=ws&security=tls&path=%2Fpyip%3Dwww.visa.com#PYIP-Mode`;
-      
-      const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Worker 配置与日志</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;line-height:1.6;background-color:#f4f4f9;color:#333;margin:0;padding:20px}.container{max-width:800px;margin:20px auto;background:#fff;padding:25px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1)}h1,h2,h3{color:#2a2a2a;border-bottom:2px solid #eaeaea;padding-bottom:10px}p,li{color:#555}button{background-color:#007bff;color:#fff;border:none;padding:10px 15px;border-radius:5px;cursor:pointer;font-size:16px;transition:background-color .3s}button:hover{background-color:#0056b3}code,pre{font-family:"Courier New",Courier,monospace;background:#e9e9e9;padding:2px 5px;border-radius:4px;word-break:break-all}.link-box{display:flex;align-items:center;justify-content:space-between;background:#f0f0f0;border:1px solid #ddd;border-radius:5px;padding:10px;margin-top:15px}.link-box pre{flex-grow:1;margin:0;padding-right:15px;white-space:pre-wrap}.copy-button{background-color:#28a745;flex-shrink:0}.copy-button:hover{background-color:#218838}#copy-status{color:#28a745;margin-top:10px;font-weight:700;display:none}.alert{padding:15px;margin-bottom:20px;border:1px solid transparent;border-radius:4px}.alert-info{color:#31708f;background-color:#d9edf7;border-color:#bce8f1}.alert-success{color:#3c763d;background-color:#dff0d8;border-color:#d6e9c6}hr{border:none;border-top:1px solid #ccc;margin:40px auto;max-width:800px}#logs{margin-top:20px}.log-entry{background:#f9f9f9;border:1px solid #ddd;border-radius:5px;padding:15px;margin-bottom:15px;word-wrap:break-word}.log-entry p{margin:0 0 10px}.log-entry strong{color:#1a1a1a}.log-entry pre{white-space:pre-wrap;word-break:break-all}.no-logs{color:#888}</style></head><body><div class="container"><h1>VLESS 配置中心</h1><div class="alert alert-info"><p><strong>工作原理：</strong> 本脚本采用“Plan A / Plan B”自动回退机制。</p><ul><li><strong>Plan A：</strong> 优先尝试直接连接目标网站。</li><li><strong>Plan B：</strong> 如果直连失败（例如目标网站受Cloudflare保护），则自动尝试使用您在路径(path)中设置的后备方案。</li></ul></div><h3>配置方案一：PYIP 模式 (推荐)</h3><div class="alert alert-success"><p>此模式是访问受Cloudflare保护网站的<strong>最佳选择</strong>。它通过“借路”一个同样使用Cloudflare的知名网站来建立隧道。</p></div><div class="link-box"><pre id="vless-pyip-link">${vlessPyipLink}</pre><button class="copy-button" onclick="copyToClipboard('vless-pyip-link')">复制 PYIP 模式</button></div><p>您可以将路径中的 <code>www.visa.com</code> 替换为任何其他大型Cloudflare网站，例如 <code>www.microsoft.com</code> 等。</p><h3 style="margin-top:30px;">配置方案二：SOCKS5 代理模式</h3><p>如果您有自己的海外SOCKS5代理服务器，可以使用此方案作为后备。</p><p>请手动修改VLESS配置中的 <code>path</code> 字段，格式如下：</p><pre>/socks5=user:pass@your.proxy.com:1080</pre><p>如果代理不需要认证，可以省略 <code>user:pass@</code> 部分。</p><h3 style="margin-top:30px;">配置方案三：直连模式 (不推荐)</h3><p>此模式无法访问受Cloudflare保护的网站，仅用于连接普通网站。不建议作为主力使用。</p><div class="link-box"><pre id="vless-link">${vlessLink}</pre><button class="copy-button" onclick="copyToClipboard('vless-link')">复制直连模式</button></div><p id="copy-status">已复制到剪贴板！</p></div><hr><div class="container"><h2>Worker 运行日志</h2><p>此页面显示最近在后台发生的连接错误。刷新此页面以查看最新日志。</p><button onclick="location.reload()">刷新日志</button><div id="logs">${errorLogs.length===0?'<p class="no-logs">目前没有错误日志。</p>':errorLogs.map(log=>{const detailsString=JSON.stringify(log.details,(key,value)=>value instanceof Error?{message:value.message,stack:value.stack}:typeof value==='bigint'?value.toString():value,2);return`<div class="log-entry"><p><strong>时间 (UTC):</strong> ${log.timestamp}</p><p><strong>信息:</strong> ${log.message}</p><pre><strong>详情:</strong>\n${detailsString}</pre></div>`}).join('')}</div></div><script>function copyToClipboard(elementId){const linkText=document.getElementById(elementId).innerText;if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(linkText).then(()=>{showCopyStatus()})}else{const tempInput=document.createElement('textarea');tempInput.style.position='absolute';tempInput.style.left='-9999px';document.body.appendChild(tempInput);tempInput.value=linkText;tempInput.select();document.execCommand('copy');document.body.removeChild(tempInput);showCopyStatus()}}
-function showCopyStatus(){const status=document.getElementById('copy-status');status.style.display='block';setTimeout(()=>{status.style.display='none'},2000)}</script></body></html>`;
-      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-
-    } catch (error) {
-      logError('Fetch Handler 发生致命错误', { error: error });
-      return new Response(`Worker 发生严重错误: ${error.message}`, { status: 500 });
+  async fetch(req, env, ctx) {
+    if (req.headers.get('Upgrade') !== 'websocket') {
+      return new Response('Hello World! This is a high-performance proxy worker.', { status: 200 });
     }
+
+    // 解析URL参数以获取路由配置 (来自路由灵活版)
+    const url = new URL(req.url);
+    const params = url.searchParams;
+    const mode = params.get('mode') || 'auto';
+    
+    let s5Config = null, httpConfig = null, proxyIpConfig = null;
+
+    if (params.has('s5')) {
+      s5Config = parseProxyConfig(params.get('s5'));
+    }
+    if (params.has('http')) {
+      httpConfig = parseProxyConfig(params.get('http'));
+    }
+    if (params.has('proxyip')) {
+      const [host, port] = parseHostPort(params.get('proxyip'), 443);
+      proxyIpConfig = { host, port };
+    }
+
+    const connectionModes = getConnectionModes(mode, params, s5Config, httpConfig, proxyIpConfig);
+    const connectionOptions = {
+        modes: connectionModes,
+        s5: s5Config,
+        http: httpConfig,
+        proxyip: proxyIpConfig,
+    };
+
+    const pair = new WebSocketPair();
+    const [client, server] = [pair[0], pair[1]];
+    server.accept();
+    server.send(new Uint8Array([0, 0])); // VLESS 协议版本响应
+
+    ctx.waitUntil(handleConnection(server, connectionOptions));
+    
+    return new Response(null, { status: 101, webSocket: client });
   }
 };
 
 
-async function 启动传输管道(ws, decodedPath) {
-  let tcpConn, writer, reader;
-  let firstPacket = false;
+// ==================== 主连接处理器 (来自优化版, 稍作修改) ====================
+async function handleConnection(ws, connectionOptions) {
+  let socket = null, writer = null, reader = null;
+  let isFirstMsg = true;
+  let connectionInfo = {
+    finalDestination: null, // 最终目标地址
+    options: connectionOptions // 路由选项
+  };
+  let isReconnecting = false;
   
-  // +++ 引入任务队列，确保数据有序发送 +++
-  let sendQueue = Promise.resolve();
-
-  ws.addEventListener('message', async event => {
-    if (!firstPacket) {
-      firstPacket = true;
-      try {
-        const firstPacketData = event.data;
-        const { destHost, destPort, addrType, initialPayload } = await parseFirstPacket(firstPacketData);
-
-        tcpConn = await createSmartConnection(destHost, destPort, addrType, decodedPath);
-        
-        await tcpConn.opened;
-        writer = tcpConn.writable.getWriter();
-        reader = tcpConn.readable.getReader();
-
-        if (initialPayload.length > 0) {
-            // 使用任务队列发送首包剩余数据
-            sendQueue = sendQueue.then(() => writer.write(initialPayload)).catch(err => logError('写入首包数据失败', {error: err}));
-        }
-
-        startBackPipe();
-
-      } catch (e) {
-        logError('首包处理或连接建立失败', { error: e.message, stack: e.stack });
-        ws.close(1011, `Error processing first packet: ${e.message}`);
-        tcpConn?.close();
+  const reconnectManager = new SmartReconnectionManager();
+  const transmitter = new ZeroCopyTransmitter();
+  const healthMonitor = new PredictiveHealthMonitor();
+  const writeQueue = new HighPerformanceQueue();
+  const readQueue = new HighPerformanceQueue();
+  
+  let lastActivity = Date.now();
+  let lastDataReceived = Date.now();
+  let bytesReceived = 0;
+  let bytesSent = 0;
+  let stallCount = 0;
+  let keepaliveTimer = null;
+  let healthCheckTimer = null;
+  
+  function updateActivity() { lastActivity = Date.now(); }
+  function updateDataReceived() { lastDataReceived = Date.now(); stallCount = 0; }
+  
+  function cleanup() {
+    if (keepaliveTimer) clearInterval(keepaliveTimer);
+    if (healthCheckTimer) clearInterval(healthCheckTimer);
+    keepaliveTimer = null;
+    healthCheckTimer = null;
+    
+    try { writer?.releaseLock(); } catch {}
+    try { reader?.releaseLock(); } catch {}
+    try { socket?.close(); } catch {}
+    
+    writer = null; reader = null; socket = null;
+    writeQueue.clear();
+    readQueue.clear();
+  }
+  
+  function startHealthMonitoring() {
+    if (keepaliveTimer) clearInterval(keepaliveTimer);
+    keepaliveTimer = setInterval(async () => {
+      const idleTime = Date.now() - lastActivity;
+      if (idleTime > CONFIG.KEEPALIVE_INTERVAL && !isReconnecting && writer) {
+        try {
+          const result = await healthMonitor.performHealthCheck(ws, writer);
+          if (result.success) {
+            updateActivity();
+            reconnectManager.updateNetworkQuality(healthMonitor.healthScore);
+          }
+        } catch {}
       }
-    } else {
-      // 后续数据包同样使用任务队列发送
-      if (writer) {
-        sendQueue = sendQueue.then(() => writer.write(event.data)).catch(err => {
-            logError('写入TCP失败', { error: err.message });
-            ws.close();
-            tcpConn?.close();
-        });
+    }, CONFIG.KEEPALIVE_INTERVAL / 2);
+    
+    if (healthCheckTimer) clearInterval(healthCheckTimer);
+    healthCheckTimer = setInterval(() => {
+      const timeSinceData = Date.now() - lastDataReceived;
+      if (bytesReceived > 0 && timeSinceData > CONFIG.STALL_TIMEOUT && !isReconnecting) {
+        stallCount++;
+        if (stallCount >= CONFIG.MAX_STALL_COUNT) {
+          attemptReconnect('stall detected');
+        }
+      }
+      
+      if (CONFIG.ENABLE_PREDICTIVE_RECONNECT && healthMonitor.shouldPreemptiveReconnect()) {
+        attemptReconnect('predictive health');
+      }
+    }, CONFIG.STALL_TIMEOUT / 2);
+  }
+  
+  async function attemptReconnect(reason) {
+    if (isReconnecting || !connectionInfo.finalDestination || ws.readyState !== 1) return;
+    
+    if (!reconnectManager.shouldReconnect()) {
+      cleanup();
+      ws.close(1011, 'Max reconnection attempts reached');
+      return;
+    }
+    
+    isReconnecting = true;
+    reconnectManager.recordFailure();
+    
+    const delay = reconnectManager.getReconnectDelay();
+    
+    try {
+      cleanup();
+      await new Promise(resolve => setTimeout(resolve, delay));
+      
+      // 使用融合的连接建立逻辑进行重连
+      const newConnection = await establishConnection(connectionInfo.finalDestination, connectionInfo.options);
+      socket = newConnection.socket;
+      writer = newConnection.writer;
+      reader = newConnection.reader;
+      
+      updateActivity();
+      updateDataReceived();
+      stallCount = 0;
+      isReconnecting = false;
+      reconnectManager.recordSuccess();
+      startReading();
+      
+    } catch (err) {
+      isReconnecting = false;
+      if (ws.readyState === 1) {
+        // Continue retrying
+        setTimeout(() => attemptReconnect('reconnect failed'), 1000);
+      } else {
+        cleanup();
+      }
+    }
+  }
+  
+  async function startReading() {
+    try {
+      while (true) {
+        const readStart = performance.now();
+        const { done, value } = await reader.read();
+        const readTime = performance.now() - readStart;
+        
+        if (value && value.length > 0) {
+          bytesReceived += value.length;
+          updateDataReceived();
+          updateActivity();
+          healthMonitor.recordHealthData(readTime, true);
+          
+          await readQueue.enqueue(() => {
+            if (ws.readyState === 1) {
+              bytesSent += value.length;
+              return ws.send(value);
+            }
+          }, 0, 5000);
+        }
+        
+        if (done) {
+          await attemptReconnect('stream ended');
+          break;
+        }
+      }
+    } catch (err) {
+      if (!isReconnecting) {
+        await attemptReconnect('read error');
+      }
+    }
+  }
+  
+  ws.addEventListener('message', async (evt) => {
+    try {
+      updateActivity();
+      
+      if (isFirstMsg) {
+        isFirstMsg = false;
+        const result = await processHandshake(evt.data, connectionInfo.options);
+        socket = result.socket;
+        writer = result.writer;
+        reader = result.reader;
+        connectionInfo.finalDestination = result.info;
+        
+        startReading();
+        startHealthMonitoring();
+      } else {
+        bytesSent += evt.data.byteLength;
+        await writeQueue.enqueue(async () => {
+          try {
+            await transmitter.optimizeTransmission(ws, evt.data, writer);
+          } catch (err) {
+            throw err;
+          }
+        }, 1, 10000);
+      }
+    } catch (err) {
+      if (!isReconnecting) {
+        setTimeout(() => attemptReconnect('initial connection error'), 100);
       }
     }
   });
+  
+  ws.addEventListener('close', cleanup);
+  ws.addEventListener('error', cleanup);
+}
 
-  async function startBackPipe() {
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        
-        if (value?.length > 0) {
-          // +++ 应用流量控制 +++
-          if (ENABLE_FLOW_CONTROL) {
-            let offset = 0;
-            while (offset < value.length) {
-              const chunk = value.slice(offset, offset + FLOW_CHUNK_SIZE);
-              sendQueue = sendQueue.then(() => ws.send(chunk)).catch(err => logError('WS分片发送失败', {error: err}));
-              offset += FLOW_CHUNK_SIZE;
-            }
-          } else {
-            sendQueue = sendQueue.then(() => ws.send(value)).catch(err => logError('WS发送失败', {error: err}));
-          }
-        }
-      }
-    } catch (e) {
-      logError('数据回传失败', { error: e.message });
-    } finally {
-      ws.close();
-      tcpConn?.close();
-    }
+// ==================== 握手与连接建立 (融合逻辑) ====================
+async function processHandshake(data, connectionOptions) {
+  const bytes = new Uint8Array(data);
+  const authKey = buildUUID(bytes, 1);
+  if (authKey !== AUTH_UUID) throw new Error('Authentication failed');
+  
+  const addrInfo = extractAddress(bytes);
+
+  // DNS 查询特殊处理 (来自路由灵活版)
+  if (addrInfo.port === 53) {
+      return handleDnsQuery(addrInfo.payload);
   }
+
+  const connection = await establishConnection(addrInfo, connectionOptions);
+
+  if (addrInfo.payload.length > 0) {
+    await connection.writer.write(addrInfo.payload);
+  }
+  
+  return {
+    socket: connection.socket,
+    writer: connection.writer,
+    reader: connection.reader,
+    info: { host: addrInfo.host, port: addrInfo.port, type: addrInfo.type }
+  };
 }
 
-async function parseFirstPacket(firstData) {
-    const buffer = (firstData instanceof ArrayBuffer) ? firstData : firstData.buffer;
-    const view = new Uint8Array(buffer);
-    
-    if (view.length < 24) { // Basic VLESS header length check
-        throw new Error('无效的VLESS请求头');
-    }
-
-    if (!isValidUUID(new Uint8Array(buffer, 1, 16))) throw new Error('UUID验证失败');
-
-    const addonLength = view[17];
-    const portIndex = 18 + addonLength + 1;
-    const destPort = new DataView(buffer, portIndex, 2).getUint16(0);
-
-    const addressIndex = portIndex + 2;
-    const addrType = view[addressIndex];
-    let addressInfoIndex = addressIndex + 1;
-    let destHost, addrLen;
-      
-    switch (addrType) {
-        case 1: addrLen = 4; destHost = new Uint8Array(buffer, addressInfoIndex, 4).join('.'); break;
-        case 2: addrLen = view[addressInfoIndex++]; destHost = new TextDecoder().decode(new Uint8Array(buffer, addressInfoIndex, addrLen)); break;
-        case 3: addrLen = 16; const ipv6 = []; const ipv6View = new DataView(buffer, addressInfoIndex, 16); for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2).toString(16)); destHost = `[${ipv6.join(':')}]`; break;
-        default: throw new Error('无效的目标地址类型');
-    }
-    
-    const initialPayload = new Uint8Array(buffer, addressInfoIndex + addrLen);
-
-    return { destHost, destPort, addrType, initialPayload };
-}
-
-async function createSmartConnection(destHost, destPort, addrType, decodedPath) {
-    let tcpConn;
-    try {
-        tcpConn = cfConnect({ hostname: destHost.replace(/\[|\]/g, ''), port: destPort });
-        return tcpConn;
-    } catch (err) {
-        logError('直连失败 (Plan A failed), 尝试后备方案 (Plan B)', { destination: `${destHost}:${destPort}`, error: err.message });
-        
-        const pyipMatch = decodedPath.match(/\/pyip=([^&]+)/);
-        if (pyipMatch && pyipMatch[1]) {
-            const [proxyHost, proxyPort] = parseHostPort(pyipMatch[1]);
-            logError('使用 PYIP 模式连接', { proxy: `${proxyHost}:${proxyPort}` });
-            return cfConnect({ hostname: proxyHost, port: proxyPort });
-        }
-
-        const socksMatch = decodedPath.match(/\/socks5=([^&]+)/);
-        if (socksMatch && socksMatch[1]) {
-            logError('使用 SOCKS5 模式连接', { proxy: socksMatch[1] });
-            return createSocks5Connection(destHost, destPort, addrType, socksMatch[1]);
-        }
-        
-        throw new Error('直连失败且未提供有效的后备方案 (pyip 或 socks5)');
-    }
-}
-
-async function createSocks5Connection(destHost, destPort, addrType, socks5Spec) {
-    const { username, password, host, port } = getSocks5Account(socks5Spec);
-    const socks5Conn = cfConnect({ hostname: host, port: port });
-    
-    await socks5Conn.opened;
-    const writer = socks5Conn.writable.getWriter();
-    const reader = socks5Conn.readable.getReader();
-
-    try {
-        await writer.write(new Uint8Array([5, 1, 2])); 
-        const authResp = (await reader.read()).value;
-        if (!authResp || authResp[0] !== 5 || authResp[1] !== 2) {
-            if (authResp[1] === 0) { // No auth needed
-                 // continue
-            } else {
-                throw new Error('SOCKS5 认证方法协商失败');
+async function establishConnection(destination, options) {
+    let establishedSocket = null;
+    for (const mode of options.modes) {
+        try {
+            switch (mode) {
+                case 's5':
+                    if (options.s5) {
+                        establishedSocket = await createSocks5ProxySocket(destination, options.s5);
+                    }
+                    break;
+                case 'http':
+                    if (options.http) {
+                        establishedSocket = await createHttpProxySocket(destination, options.http);
+                    }
+                    break;
+                case 'proxyip':
+                     if (options.proxyip) {
+                        establishedSocket = await connect(options.proxyip);
+                    }
+                    break;
+                case 'direct':
+                    const hostname = destination.type === 3 ? `[${destination.host}]` : destination.host;
+                    establishedSocket = await connect({ hostname, port: destination.port });
+                    break;
             }
+            if (establishedSocket) break; // if connection is successful, break the loop
+        } catch (err) {
+            // Log error but continue to next mode
         }
-        if (authResp[1] === 2) {
-            const userPassPacket = new Uint8Array([1, username.length, ...new TextEncoder().encode(username), password.length, ...new TextEncoder().encode(password)]);
-            await writer.write(userPassPacket);
-            const userPassResp = (await reader.read()).value;
-            if (!userPassResp || userPassResp[0] !== 1 || userPassResp[1] !== 0) {
-                throw new Error('SOCKS5 账号密码错误');
-            }
-        }
-        
-        let addressBytes;
-        const encoder = new TextEncoder();
-        const cleanDestHost = destHost.replace(/\[|\]/g, '');
+    }
+    
+    if (!establishedSocket) {
+        throw new Error('All connection modes failed');
+    }
 
-        if (addrType === 1) { 
-            addressBytes = [1, ...cleanDestHost.split('.').map(Number)];
-        } else if (addrType === 2) {
-            const domainBytes = encoder.encode(cleanDestHost);
-            addressBytes = [3, domainBytes.length, ...domainBytes];
+    await establishedSocket.opened;
+    return {
+        socket: establishedSocket,
+        writer: establishedSocket.writable.getWriter(),
+        reader: establishedSocket.readable.getReader()
+    };
+}
+
+// ==================== SOCKS5 & HTTP 代理逻辑 (来自路由灵活版) ====================
+async function createSocks5ProxySocket(destination, proxyConfig) {
+    const socket = await connect({ hostname: proxyConfig.host, port: proxyConfig.port });
+    await socket.opened;
+    
+    const writer = socket.writable.getWriter();
+    const reader = socket.readable.getReader();
+    const encoder = new TextEncoder();
+
+    // SOCKS5 handshake
+    await writer.write(new Uint8Array([5, 1, 0])); // Version 5, 1 auth method, no-auth
+    const resp1 = (await reader.read()).value;
+    if (resp1[0] !== 5 || resp1[1] !== 0) {
+        // Attempt username/password auth if no-auth fails or is not offered
+        await writer.write(new Uint8Array([5, 2, 0, 2]));
+        const respAuth = (await reader.read()).value;
+        if (respAuth[0] !== 5 || respAuth[1] !== 2) throw new Error('SOCKS5 auth method negotiation failed');
+        
+        if (!proxyConfig.user || !proxyConfig.pass) throw new Error('SOCKS5 server requires authentication, but no credentials provided');
+        const user = encoder.encode(proxyConfig.user);
+        const pass = encoder.encode(proxyConfig.pass);
+        const authPacket = new Uint8Array([1, user.length, ...user, pass.length, ...pass]);
+        await writer.write(authPacket);
+        const authResult = (await reader.read()).value;
+        if (authResult[0] !== 1 || authResult[1] !== 0) throw new Error('SOCKS5 authentication failed');
+    }
+
+    // SOCKS5 connect request
+    let destHostBytes;
+    switch (destination.type) {
+        case 1: // IPv4
+            destHostBytes = new Uint8Array([1, ...destination.host.split('.').map(Number)]);
+            break;
+        case 2: // Domain
+            destHostBytes = new Uint8Array([3, destination.host.length, ...encoder.encode(destination.host)]);
+            break;
+        case 3: // IPv6
+            destHostBytes = new Uint8Array([4, ...destination.host.split(':').flatMap(s => { const n = parseInt(s, 16) || 0; return [n >> 8, n & 0xff]; })]);
+            break;
+    }
+    
+    const portBytes = new Uint8Array([destination.port >> 8, destination.port & 0xff]);
+    await writer.write(new Uint8Array([5, 1, 0, ...destHostBytes, ...portBytes]));
+
+    const resp2 = (await reader.read()).value;
+    if (resp2[0] !== 5 || resp2[1] !== 0) throw new Error(`SOCKS5 connection failed with code ${resp2[1]}`);
+    
+    writer.releaseLock();
+    reader.releaseLock();
+    return socket;
+}
+
+async function createHttpProxySocket(destination, proxyConfig) {
+    const socket = await connect({ hostname: proxyConfig.host, port: proxyConfig.port });
+    await socket.opened;
+
+    const writer = socket.writable.getWriter();
+    const reader = socket.readable.getReader();
+    
+    const destAddress = destination.type === 3 ? `[${destination.host}]:${destination.port}` : `${destination.host}:${destination.port}`;
+    let connectRequest = `CONNECT ${destAddress} HTTP/1.1\r\nHost: ${destAddress}\r\n`;
+
+    if (proxyConfig.user || proxyConfig.pass) {
+        const credentials = btoa(`${proxyConfig.user}:${proxyConfig.pass}`);
+        connectRequest += `Proxy-Authorization: Basic ${credentials}\r\n`;
+    }
+    connectRequest += '\r\n';
+
+    await writer.write(new TextEncoder().encode(connectRequest));
+
+    let response = '';
+    const decoder = new TextDecoder();
+    while (!response.includes('\r\n\r\n')) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error('HTTP proxy connection closed prematurely');
+        response += decoder.decode(value, { stream: true });
+    }
+    
+    if (!response.startsWith('HTTP/1.1 200')) {
+        throw new Error(`HTTP proxy connection failed: ${response.split('\r\n')[0]}`);
+    }
+
+    writer.releaseLock();
+    reader.releaseLock();
+    return socket;
+}
+
+async function handleDnsQuery(query) {
+    const dohResponse = await fetch('https://1.1.1.1/dns-query', {
+        method: 'POST',
+        headers: { 'content-type': 'application/dns-message' },
+        body: query
+    });
+    const dnsResult = await dohResponse.arrayBuffer();
+    // This part is tricky as we don't have a WebSocket to send back to.
+    // The current architecture assumes a long-lived connection.
+    // For simplicity, we'll let this fail silently, as DNS-over-WS is a niche use case.
+    // A proper implementation would require restructuring handleConnection significantly.
+    // For now, we throw an error to indicate it's not supported in this merged version.
+    throw new Error("DNS-over-WebSocket is not supported in this advanced configuration.");
+}
+
+
+// ==================== 所有管理器和类 (来自优化版) ====================
+// SmartReconnectionManager, ZeroCopyTransmitter, PredictiveHealthMonitor, HighPerformanceQueue
+// (These classes are copied directly from the "极致优化版" script without modification)
+class SmartReconnectionManager{constructor(){this.attempts=0;this.lastReconnectTime=0;this.networkQuality=1;this.consecutiveFailures=0}shouldReconnect(){if(this.attempts>=CONFIG.MAX_RECONNECT_ATTEMPTS)return!1;const e=Math.min(.8,.3+this.attempts*.05);return!(this.networkQuality<e&&this.attempts>3&&Math.random()>.5)}getReconnectDelay(){const e=CONFIG.BASE_RECONNECT_DELAY,t=CONFIG.MAX_RECONNECT_DELAY;let s=Math.min(e*Math.pow(1.8,this.attempts-1),t);s*=1.5-.5*this.networkQuality;const o=s*CONFIG.RECONNECT_JITTER*(2*Math.random()-1);return s=Math.max(10,s+o),this.consecutiveFailures>2&&(s*=1+this.consecutiveFailures*.2),Math.min(s,t)}recordSuccess(){this.consecutiveFailures=0;this.attempts=0;this.networkQuality=Math.min(1,this.networkQuality+.1)}recordFailure(){this.attempts++;this.consecutiveFailures++;this.networkQuality=Math.max(.1,this.networkQuality-.15)}updateNetworkQuality(e){this.networkQuality=e}}
+class ZeroCopyTransmitter{constructor(){this.chunkSize=CONFIG.INITIAL_CHUNK_SIZE;this.latencyHistory=[];this.throughputHistory=[];this.lastAdjustment=Date.now()}optimizeTransmission(e,t,s){return!CONFIG.ENABLE_DYNAMIC_CHUNKING||t.length<=this.chunkSize?this.directTransmit(e,t,s):this.chunkedTransmit(e,t,s)}async directTransmit(e,t,s){const o=performance.now();try{await s.write(t);const e=performance.now()-o;this.recordMetrics(t.length,e),this.adjustChunkSize()}catch(e){throw e}}async chunkedTransmit(e,t,s){const o=new Uint8Array(t);let i=0;const r=[];for(;i<o.length;){const t=o.slice(i,i+this.chunkSize),a=s.write(t).then(()=>{const e=5*Math.random()+1;this.recordMetrics(t.length,e)});if(r.push(a),i+=this.chunkSize,r.length>=CONFIG.CONCURRENCY_LIMIT){await Promise.race(r);const e=r.findIndex(e=>e.isFulfilled);e>-1&&r.splice(e,1)}}await Promise.all(r),this.adjustChunkSize()}recordMetrics(e,t){this.latencyHistory.push(t),this.throughputHistory.push(e),this.latencyHistory.length>CONFIG.SAMPLE_WINDOW&&this.latencyHistory.shift(),this.throughputHistory.length>CONFIG.SAMPLE_WINDOW&&this.throughputHistory.shift()}adjustChunkSize(){if(Date.now()-this.lastAdjustment<1e3||this.latencyHistory.length<5)return;const e=this.latencyHistory.reduce((e,t)=>e+t)/this.latencyHistory.length,t=this.throughputHistory.reduce((e,t)=>e+t)/this.throughputHistory.length;let s=this.chunkSize;e<20&&t>1048576?s=Math.min(2*this.chunkSize,CONFIG.MAX_CHUNK_SIZE):e<50&&t>524288?s=Math.min(1.5*this.chunkSize,CONFIG.MAX_CHUNK_SIZE):e>200?s=Math.max(.7*this.chunkSize,CONFIG.MIN_CHUNK_SIZE):e>500&&(s=Math.max(.4*this.chunkSize,CONFIG.MIN_CHUNK_SIZE)),this.chunkSize=Math.round(.6*this.chunkSize+.4*s),this.lastAdjustment=Date.now()}getOptimalChunkSize(){return this.chunkSize}}
+class PredictiveHealthMonitor{constructor(){this.metrics={rtt:[],jitter:[],throughput:[],packetLoss:0};this.healthScore=1;this.lastHealthUpdate=Date.now();this.degradationTrend=0}async performHealthCheck(e,t){const s=performance.now(),o=Date.now();try{const i=new ArrayBuffer(8);return new DataView(i).setBigUint64(0,BigInt(s),!0),await t.write(new Uint8Array(i)),new Promise(t=>{const r=setTimeout(()=>{this.recordHealthData(null,!1),t({success:!1,rtt:null,checkId:o})},3e3);const a=i=>{if(8===i.data.byteLength){clearTimeout(r);const n=performance.now()-s;this.recordHealthData(n,!0),e.removeEventListener("message",a),t({success:!0,rtt:n,checkId:o})}};e.addEventListener("message",a)})}catch(e){return this.recordHealthData(null,!1),{success:!1,rtt:null,checkId:o}}}recordHealthData(e,t){if(t&&null!==e){this.metrics.rtt.push(e),this.metrics.rtt.length>20&&this.metrics.rtt.shift(),this.metrics.rtt.length>=2&&this.metrics.jitter.push(Math.abs(e-this.metrics.rtt[this.metrics.rtt.length-2])),this.metrics.jitter.length>20&&this.metrics.jitter.shift(),this.degradationTrend=Math.max(-.5,this.degradationTrend-.1)}else this.metrics.packetLoss++,this.degradationTrend=Math.min(1,this.degradationTrend+.2);this.updateHealthScore()}updateHealthScore(){if(0===this.metrics.rtt.length)return void(this.healthScore=.8);const e=this.metrics.rtt.reduce((e,t)=>e+t,0)/this.metrics.rtt.length,t=this.metrics.jitter.length>0?this.metrics.jitter.reduce((e,t)=>e+t,0)/this.metrics.jitter.length:0;let s=1,o=1;e>1e3?s=.1:e>500?s=.3:e>200?s=.6:e>100&&(s=.8);let i=1;t>100?i=.3:t>50?i=.6:t>20&&(i=.8),this.healthScore=Math.max(.1,Math.min(1,.6*s+.4*i))*(1-.3*this.degradationTrend),this.lastHealthUpdate=Date.now()}shouldPreemptiveReconnect(){return Date.now()-this.lastHealthUpdate>1e4&&this.healthScore<.4||this.healthScore<.2&&this.degradationTrend>.7}getHealthStatus(){const e=Date.now()-this.lastHealthUpdate;return e>15e3?"unknown":this.healthScore>=.8?"excellent":this.healthScore>=.6?"good":this.healthScore>=.4?"fair":"poor"}}
+class HighPerformanceQueue{constructor(e=CONFIG.CONCURRENCY_LIMIT){this.tasks=[];this.active=0;this.processed=0;this.failed=0;this.concurrency=e;this.processing=!1}async enqueue(e,t=0,s=CONFIG.QUEUE_TIMEOUT){return new Promise((o,i)=>{const r={task:e,resolve:o,reject:i,priority:t,timestamp:Date.now(),timeoutId:setTimeout(()=>{i(new Error("Queue timeout"))},s)};this.insertTask(r),this.process()})}insertTask(e){let t=!1;for(let s=0;s<this.tasks.length;s++)if(this.tasks[s].priority<e.priority){this.tasks.splice(s,0,e),t=!0;break}t||this.tasks.push(e)}async process(){if(this.processing||this.active>=this.concurrency||0===this.tasks.length)return;this.processing=!0;for(;this.tasks.length>0&&this.active<this.concurrency;){const e=this.tasks.shift();this.active++,(async()=>{try{clearTimeout(e.timeoutId);const t=await e.task();this.processed++,e.resolve(t)}catch(t){this.failed++,e.reject(t)}finally{this.active--,this.tasks.length>0?this.process():this.processing=!1}})()}this.processing=!1}getStats(){const e=this.processed+this.failed;return{queueLength:this.tasks.length,active:this.active,processed:this.processed,failed:this.failed,successRate:e>0?this.processed/e:1,concurrency:this.concurrency}}clear(){this.tasks.forEach(e=>clearTimeout(e.timeoutId)),this.tasks=[]}}
+
+
+// ==================== 所有工具函数 (来自两个脚本) ====================
+function parseProxyConfig(proxyStr) {
+    let user = null, pass = null, host = null, port = null;
+    const atIndex = proxyStr.lastIndexOf('@');
+    if (atIndex !== -1) {
+        const credentials = proxyStr.substring(0, atIndex);
+        const colonIndex = credentials.indexOf(':');
+        if (colonIndex !== -1) {
+            user = decodeURIComponent(credentials.substring(0, colonIndex));
+            pass = decodeURIComponent(credentials.substring(colonIndex + 1));
         } else {
-             const ipv6Bytes = [];
-             const hextets = cleanDestHost.split(':');
-             for (const hextet of hextets) {
-                const val = parseInt(hextet, 16);
-                ipv6Bytes.push(val >> 8, val & 0xff);
-             }
-             addressBytes = [4, ...ipv6Bytes];
+            user = decodeURIComponent(credentials);
         }
-
-        const portBytes = [destPort >> 8, destPort & 0xff];
-        const connectReq = new Uint8Array([5, 1, 0, ...addressBytes, ...portBytes]);
-        
-        await writer.write(connectReq);
-        const connectResp = (await reader.read()).value;
-        if (!connectResp || connectResp[0] !== 5 || connectResp[1] !== 0) {
-            throw new Error(`SOCKS5 连接目标失败: ${connectResp[1]}`);
-        }
-        
-        writer.releaseLock();
-        reader.releaseLock();
-        return socks5Conn;
-
-    } catch(e) {
-        writer.releaseLock();
-        reader.releaseLock();
-        await socks5Conn.close();
-        throw e;
+        [host, port] = parseHostPort(proxyStr.substring(atIndex + 1));
+    } else {
+        [host, port] = parseHostPort(proxyStr);
     }
+    return { user, pass, host, port: +port || 443 };
+}
+
+function parseHostPort(hostPortStr, defaultPort = 443) {
+    if (hostPortStr.startsWith('[')) {
+        const closingBracketIndex = hostPortStr.lastIndexOf(']');
+        const host = hostPortStr.substring(1, closingBracketIndex);
+        const port = hostPortStr.substring(closingBracketIndex + 2) || defaultPort;
+        return [host, port];
+    }
+    const colonIndex = hostPortStr.lastIndexOf(':');
+    if (colonIndex === -1) {
+        return [hostPortStr, defaultPort];
+    }
+    return [hostPortStr.substring(0, colonIndex), hostPortStr.substring(colonIndex + 1)];
+}
+
+function getConnectionModes(mode, params, s5, http, proxyip) {
+    if (mode !== 'auto') {
+        return [mode];
+    }
+    const order = [];
+    for (const key of params.keys()) {
+        if (key === 's5' && s5 && !order.includes('s5')) order.push('s5');
+        else if (key === 'http' && http && !order.includes('http')) order.push('http');
+        else if (key === 'proxyip' && proxyip && !order.includes('proxyip')) order.push('proxyip');
+        else if (key === 'direct' && !order.includes('direct')) order.push('direct');
+    }
+    return order.length ? order : ['direct'];
+}
+
+function buildUUID(arr, start) {
+  const hex = Array.from(arr.slice(start, start + 16)).map(n => n.toString(16).padStart(2, '0')).join('');
+  return hex.replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
+}
+
+function extractAddress(bytes) {
+  const offset1 = 18 + bytes[17] + 1;
+  const port = (bytes[offset1] << 8) | bytes[offset1 + 1];
+  const type = bytes[offset1 + 2];
+  let offset2 = offset1 + 3;
+  let length, host;
+  
+  switch (type) {
+    case 1: // IPv4
+      length = 4;
+      host = bytes.slice(offset2, offset2 + length).join('.');
+      break;
+    case 2: // Domain
+      length = bytes[offset2];
+      offset2++;
+      host = new TextDecoder().decode(bytes.slice(offset2, offset2 + length));
+      break;
+    case 3: // IPv6
+      length = 16;
+      host = Array.from({length: 8}, (_, i) => {
+          const val = (bytes[offset2 + i * 2] << 8) | bytes[offset2 + i * 2 + 1];
+          return val.toString(16);
+      }).join(':');
+      break;
+    default:
+      throw new Error(`Invalid address type: ${type}`);
+  }
+  
+  const payload = bytes.slice(offset2 + length);
+  return { host, port, type, payload };
 }
