@@ -331,6 +331,8 @@ async function establishConnection(destination, options) {
 }
 
 // ==================== SOCKS5 & HTTP 代理逻辑 (来自路由灵活版) ====================
+
+// [!] 已修复: 替换为健壮的SOCKS5处理逻辑
 async function createSocks5ProxySocket(destination, proxyConfig) {
     const socket = await connect({ hostname: proxyConfig.host, port: proxyConfig.port });
     await socket.opened;
@@ -339,22 +341,15 @@ async function createSocks5ProxySocket(destination, proxyConfig) {
     const reader = socket.readable.getReader();
     const encoder = new TextEncoder();
 
-    // SOCKS5 handshake
-    await writer.write(new Uint8Array([5, 1, 0])); // Version 5, 1 auth method, no-auth
-    const resp1 = (await reader.read()).value;
+    // SOCKS5 handshake - 使用了新的 readExactly 函数
+    // 注意: 当前实现只支持无需认证的SOCKS5代理
+    await writer.write(new Uint8Array([5, 1, 0])); // 只支持无认证
+    const resp1 = await readExactly(reader, 2);   // 精确读取2字节
     if (resp1[0] !== 5 || resp1[1] !== 0) {
-        // Attempt username/password auth if no-auth fails or is not offered
-        await writer.write(new Uint8Array([5, 2, 0, 2]));
-        const respAuth = (await reader.read()).value;
-        if (respAuth[0] !== 5 || respAuth[1] !== 2) throw new Error('SOCKS5 auth method negotiation failed');
-        
-        if (!proxyConfig.user || !proxyConfig.pass) throw new Error('SOCKS5 server requires authentication, but no credentials provided');
-        const user = encoder.encode(proxyConfig.user);
-        const pass = encoder.encode(proxyConfig.pass);
-        const authPacket = new Uint8Array([1, user.length, ...user, pass.length, ...pass]);
-        await writer.write(authPacket);
-        const authResult = (await reader.read()).value;
-        if (authResult[0] !== 1 || authResult[1] !== 0) throw new Error('SOCKS5 authentication failed');
+        writer.releaseLock();
+        reader.releaseLock();
+        socket.close();
+        throw new Error(`SOCKS5 handshake failed. Expected [5, 0], but got [${resp1.join(', ')}]. Your proxy might require authentication.`);
     }
 
     // SOCKS5 connect request
@@ -367,20 +362,77 @@ async function createSocks5ProxySocket(destination, proxyConfig) {
             destHostBytes = new Uint8Array([3, destination.host.length, ...encoder.encode(destination.host)]);
             break;
         case 3: // IPv6
-            destHostBytes = new Uint8Array([4, ...destination.host.split(':').flatMap(s => { const n = parseInt(s, 16) || 0; return [n >> 8, n & 0xff]; })]);
+            // 修复IPv6解析bug
+            const ipv6Bytes = destination.host.split(':').flatMap(s => {
+                if (s === '') return []; // 处理双冒号 "::"
+                const hex = s.padStart(4, '0');
+                return [parseInt(hex.substring(0, 2), 16), parseInt(hex.substring(2, 4), 16)];
+            });
+             // 填充因 "::" 导致的缺失字节
+            const expectedLength = 16;
+            const finalIpv6Bytes = new Uint8Array(expectedLength);
+            let head = [], tail = [];
+            let doubleColonIndex = destination.host.split(':').indexOf('');
+            if (doubleColonIndex !== -1) {
+                let parts = destination.host.split('::');
+                let headParts = parts[0].split(':').filter(p => p);
+                let tailParts = parts.length > 1 && parts[1] ? parts[1].split(':').filter(p => p) : [];
+                
+                let headBytes = headParts.flatMap(s => {
+                    const hex = s.padStart(4, '0');
+                    return [parseInt(hex.substring(0, 2), 16), parseInt(hex.substring(2, 4), 16)];
+                });
+                 let tailBytes = tailParts.flatMap(s => {
+                    const hex = s.padStart(4, '0');
+                    return [parseInt(hex.substring(0, 2), 16), parseInt(hex.substring(2, 4), 16)];
+                });
+
+                finalIpv6Bytes.set(headBytes, 0);
+                finalIpv6Bytes.set(tailBytes, expectedLength - tailBytes.length);
+
+            } else {
+                 finalIpv6Bytes.set(ipv6Bytes);
+            }
+
+            destHostBytes = new Uint8Array([4, ...finalIpv6Bytes]);
             break;
     }
     
     const portBytes = new Uint8Array([destination.port >> 8, destination.port & 0xff]);
     await writer.write(new Uint8Array([5, 1, 0, ...destHostBytes, ...portBytes]));
 
-    const resp2 = (await reader.read()).value;
-    if (resp2[0] !== 5 || resp2[1] !== 0) throw new Error(`SOCKS5 connection failed with code ${resp2[1]}`);
+    // Read SOCKS5 connect response - 使用了新的 readExactly 函数
+    const resp2Header = await readExactly(reader, 4); // 精确读取固定的4个字节头 (VER, REP, RSV, ATYP)
+    if (resp2Header[0] !== 5 || resp2Header[1] !== 0) {
+        writer.releaseLock();
+        reader.releaseLock();
+        socket.close();
+        throw new Error(`SOCKS5 connection failed with code ${resp2Header[1]}`);
+    }
+
+    // 根据ATYP，读取剩余的地址和端口，并丢弃它们，以清空缓冲区
+    let remainingLength = 0;
+    switch (resp2Header[3]) { // ATYP
+        case 1: // IPv4
+            remainingLength = 4 + 2;
+            break;
+        case 3: // Domain, 第一个字节是长度
+            const domainLen = (await readExactly(reader, 1))[0];
+            remainingLength = domainLen + 2;
+            break;
+        case 4: // IPv6
+            remainingLength = 16 + 2;
+            break;
+    }
+    if (remainingLength > 0) {
+        await readExactly(reader, remainingLength);
+    }
     
     writer.releaseLock();
     reader.releaseLock();
     return socket;
 }
+
 
 async function createHttpProxySocket(destination, proxyConfig) {
     const socket = await connect({ hostname: proxyConfig.host, port: proxyConfig.port });
@@ -525,4 +577,35 @@ function extractAddress(bytes) {
   
   const payload = bytes.slice(offset2 + length);
   return { host, port, type, payload };
+}
+
+// [!] 新增: 用于精确读取指定长度字节的辅助函数
+/**
+ * 从 reader 中精确读取指定长度的字节
+ * @param {ReadableStreamDefaultReader} reader 
+ * @param {number} length 
+ * @returns {Promise<Uint8Array>}
+ */
+async function readExactly(reader, length) {
+  let buffer = new Uint8Array(length);
+  let bytesRead = 0;
+  while (bytesRead < length) {
+    const { done, value } = await reader.read();
+    if (done) {
+      // 如果流提前结束，抛出错误
+      throw new Error(`Stream ended prematurely. Expected ${length} bytes, but only got ${bytesRead}.`);
+    }
+    
+    // 计算当前数据块中我们还需要的部分
+    const bytesToRead = Math.min(value.length, length - bytesRead);
+    const chunk = value.subarray(0, bytesToRead);
+    
+    buffer.set(chunk, bytesRead);
+    bytesRead += chunk.length;
+
+    // 注意: 这个简单实现没有处理 value 中可能包含下一个响应数据的情况。
+    // 对于SOCKS5这种简单的请求-响应模式，这通常是安全的。
+    // 更复杂的协议需要一个更复杂的带缓冲的读取器。
+  }
+  return buffer;
 }
